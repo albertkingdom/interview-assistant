@@ -23,6 +23,7 @@ const SYSTEM_PROMPT = `你是一位資深面試輔助 AI，協助面試官在面
 }`;
 
 const TOPICS_DEFAULT = ["技術能力", "過去經驗", "問題解決", "團隊合作", "自我驅動", "職涯規劃"];
+const RECORDS_STORAGE_KEY = "interview-assistant.records.v1";
 const GEMINI_RESPONSE_SCHEMA = {
   type: "OBJECT",
   properties: {
@@ -59,6 +60,7 @@ export default function InterviewAssistant() {
   const [coveredTopics, setCoveredTopics] = useState([]);
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
+  const [exportStatus, setExportStatus] = useState("");
   // listeningTarget: null | "question" | "answer"
   const [listeningTarget, setListeningTarget] = useState(null);
   const [interimText, setInterimText] = useState(""); // live interim display
@@ -257,6 +259,120 @@ export default function InterviewAssistant() {
     setTimeout(() => historyRef.current?.scrollTo({ top: 99999, behavior: "smooth" }), 100);
   };
 
+  const buildInterviewRecord = () => {
+    const items = [...conversation];
+    const pendingQuestion = currentQuestion.trim();
+    const pendingAnswer = currentAnswer.trim();
+    if (pendingQuestion && pendingAnswer) {
+      const last = items[items.length - 1];
+      if (!(last?.question === pendingQuestion && last?.answer === pendingAnswer)) {
+        items.push({ question: pendingQuestion, answer: pendingAnswer });
+      }
+    }
+
+    return {
+      id: String(Date.now()),
+      createdAt: new Date().toISOString(),
+      jobTitle: jobTitle.trim() || "未指定",
+      topics: [...customTopics],
+      coveredTopics: [...coveredTopics],
+      conversation: items,
+      aiSummary: aiResult && !aiResult.error ? aiResult : null
+    };
+  };
+
+  const saveInterviewRecord = (record) => {
+    try {
+      const raw = localStorage.getItem(RECORDS_STORAGE_KEY);
+      const records = raw ? JSON.parse(raw) : [];
+      const next = [record, ...records];
+      localStorage.setItem(RECORDS_STORAGE_KEY, JSON.stringify(next));
+    } catch (err) {
+      console.error(err);
+      throw new Error("儲存面試紀錄失敗");
+    }
+  };
+
+  const formatDateTime = (isoString) => {
+    const d = new Date(isoString);
+    return d.toLocaleString("zh-TW", { hour12: false });
+  };
+
+  const buildMarkdownFromRecord = (record) => {
+    const lines = [
+      `# 面試紀錄 - ${record.jobTitle}`,
+      "",
+      `- 產生時間：${formatDateTime(record.createdAt)}`,
+      `- 面試主題：${record.topics.join("、") || "無"}`,
+      `- 已覆蓋主題：${record.coveredTopics.join("、") || "無"}`,
+      ""
+    ];
+
+    lines.push("## 對話紀錄", "");
+    record.conversation.forEach((turn, idx) => {
+      lines.push(`### 第 ${idx + 1} 輪`);
+      lines.push(`**面試官：** ${turn.question}`);
+      lines.push(`**面試者：** ${turn.answer}`);
+      lines.push("");
+    });
+
+    if (record.aiSummary) {
+      lines.push("## 最後一次 AI 分析", "");
+      lines.push(`- 品質分數：${record.aiSummary.quality?.score ?? "N/A"}`);
+      lines.push(`- 評級：${record.aiSummary.quality?.label ?? "N/A"}`);
+      lines.push(`- 評語：${record.aiSummary.quality?.comment ?? "N/A"}`);
+      lines.push("");
+      lines.push("### 建議下一題");
+      (record.aiSummary.nextQuestions || []).forEach((q, idx) => lines.push(`${idx + 1}. ${q}`));
+      lines.push("");
+      lines.push("### 尚未涵蓋主題");
+      (record.aiSummary.uncoveredTopics || []).forEach((t) => lines.push(`- ${t}`));
+      lines.push("");
+    }
+
+    return lines.join("\n");
+  };
+
+  const downloadMarkdown = (record, markdown) => {
+    const safeJobTitle = record.jobTitle.replace(/[\\/:*?"<>|]/g, "-");
+    const timestamp = record.createdAt.replace(/[:]/g, "-").replace(/\.\d{3}Z$/, "");
+    const filename = `interview-${safeJobTitle || "record"}-${timestamp}.md`;
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const finishInterviewAndExport = () => {
+    if (listeningTargetRef.current) {
+      shouldRestartRef.current = false;
+      safeStopRecognition(recognitionRef.current);
+      setTarget(null);
+      setInterimText("");
+    }
+
+    const record = buildInterviewRecord();
+    if (record.conversation.length === 0) {
+      setExportStatus("尚無對話可匯出");
+      return;
+    }
+
+    try {
+      saveInterviewRecord(record);
+      const markdown = buildMarkdownFromRecord(record);
+      downloadMarkdown(record, markdown);
+      setExportStatus("已儲存面試紀錄，並下載 Markdown");
+    } catch (err) {
+      console.error(err);
+      setExportStatus("匯出失敗，請稍後再試");
+    }
+  };
+
   const callGemini = async () => {
     const questionSnapshot = currentQuestion.trim();
     const answerSnapshot = currentAnswer.trim();
@@ -350,6 +466,8 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
   };
 
   const scoreLabel = ["", "薄弱", "普通", "普通", "良好", "優秀"];
+  const canExport =
+    conversation.length > 0 || Boolean(currentQuestion.trim() && currentAnswer.trim());
 
   if (phase === "setup") {
     return (
@@ -605,6 +723,30 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
       {/* Right sidebar - AI results */}
       <div style={{ background: "#0d0d14", borderLeft: "1px solid #1a1a28", overflowY: "auto", padding: 20 }}>
         <div style={{ color: "#555", fontSize: ".75rem", letterSpacing: ".1em", marginBottom: 16 }}>AI 輔助面板</div>
+        <button
+          onClick={finishInterviewAndExport}
+          disabled={!canExport}
+          style={{
+            width: "100%",
+            marginBottom: 10,
+            background: canExport ? "#1d3c7a" : "#111",
+            border: `1px solid ${canExport ? "#2c4f96" : "#1a1a1a"}`,
+            borderRadius: 8,
+            padding: "10px 12px",
+            color: canExport ? "#d7e6ff" : "#333",
+            cursor: canExport ? "pointer" : "not-allowed",
+            fontSize: ".85rem",
+            fontWeight: 600,
+            fontFamily: "inherit"
+          }}
+        >
+          完成面試並匯出 Markdown
+        </button>
+        {exportStatus && (
+          <div style={{ color: "#6ea8ff", fontSize: ".75rem", marginBottom: 14, lineHeight: 1.5 }}>
+            {exportStatus}
+          </div>
+        )}
 
         {!aiResult && !isLoading && (
           <div style={{ color: "#333", fontSize: ".85rem", lineHeight: 1.8, textAlign: "center", marginTop: "3rem" }}>
