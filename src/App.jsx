@@ -23,6 +23,29 @@ const SYSTEM_PROMPT = `你是一位資深面試輔助 AI，協助面試官在面
 }`;
 
 const TOPICS_DEFAULT = ["技術能力", "過去經驗", "問題解決", "團隊合作", "自我驅動", "職涯規劃"];
+const GEMINI_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    quality: {
+      type: "OBJECT",
+      properties: {
+        score: { type: "INTEGER" },
+        label: { type: "STRING" },
+        comment: { type: "STRING" }
+      },
+      required: ["score", "label", "comment"]
+    },
+    nextQuestions: {
+      type: "ARRAY",
+      items: { type: "STRING" }
+    },
+    uncoveredTopics: {
+      type: "ARRAY",
+      items: { type: "STRING" }
+    }
+  },
+  required: ["quality", "nextQuestions", "uncoveredTopics"]
+};
 
 export default function InterviewAssistant() {
   const [apiKey, setApiKey] = useState("");
@@ -152,10 +175,73 @@ export default function InterviewAssistant() {
     }
   };
 
+  const escapeControlCharsInString = (text) => {
+    let result = "";
+    let inString = false;
+    let escaped = false;
+
+    for (const char of text) {
+      if (escaped) {
+        result += char;
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        result += char;
+        escaped = true;
+        continue;
+      }
+
+      if (char === "\"") {
+        result += char;
+        inString = !inString;
+        continue;
+      }
+
+      if (inString && (char === "\n" || char === "\r")) {
+        result += "\\n";
+        continue;
+      }
+
+      if (inString && char === "\t") {
+        result += "\\t";
+        continue;
+      }
+
+      result += char;
+    }
+
+    return result;
+  };
+
+  const extractJsonObjectText = (text) => {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start === -1 || end === -1 || end <= start) return text;
+    return text.slice(start, end + 1);
+  };
+
   const parseAiJson = (rawText) => {
     if (!rawText) return {};
     const cleaned = rawText.replace(/```json|```/g, "").trim();
-    return JSON.parse(cleaned);
+    const jsonCandidates = [cleaned, extractJsonObjectText(cleaned)];
+
+    for (const candidate of jsonCandidates) {
+      if (!candidate) continue;
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        const repaired = escapeControlCharsInString(candidate).replace(/,\s*([}\]])/g, "$1");
+        try {
+          return JSON.parse(repaired);
+        } catch {
+          // continue to try next candidate
+        }
+      }
+    }
+
+    throw new Error("模型回傳格式不完整，請再試一次");
   };
 
   const callGemini = async () => {
@@ -198,8 +284,9 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
           ],
           generationConfig: {
             responseMimeType: "application/json",
+            responseSchema: GEMINI_RESPONSE_SCHEMA,
             maxOutputTokens: 1000,
-            temperature: 0.3
+            temperature: 0.2
           }
         })
       });
