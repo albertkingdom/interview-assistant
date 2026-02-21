@@ -158,10 +158,10 @@ export default function InterviewAssistant() {
     return JSON.parse(cleaned);
   };
 
-  const callClaude = async () => {
+  const callGemini = async () => {
     if (!currentAnswer.trim()) return;
     if (!apiKey.trim()) {
-      setAiResult({ error: "請先輸入 Anthropic API Key" });
+      setAiResult({ error: "請先輸入 Gemini API Key" });
       return;
     }
 
@@ -179,19 +179,28 @@ export default function InterviewAssistant() {
 ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答：${currentAnswer}`;
 
     try {
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true"
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 1000,
-          system: SYSTEM_PROMPT,
-          messages: [{ role: "user", content: userMsg }]
+          systemInstruction: {
+            parts: [{ text: SYSTEM_PROMPT }]
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: userMsg }]
+            }
+          ],
+          generationConfig: {
+            responseMimeType: "application/json",
+            maxOutputTokens: 1000,
+            temperature: 0.3
+          }
         })
       });
 
@@ -201,7 +210,7 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
         throw new Error(errMsg);
       }
 
-      const text = data.content?.[0]?.text || "{}";
+      const text = data?.candidates?.[0]?.content?.parts?.find((part) => typeof part?.text === "string")?.text || "{}";
       const parsed = parseAiJson(text);
       setAiResult(parsed);
 
@@ -264,12 +273,12 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
           </div>
 
           <div style={{ background: "#111118", border: "1px solid #222", borderRadius: 12, padding: "2rem" }}>
-            <label style={{ color: "#aaa", fontSize: ".8rem", letterSpacing: ".1em", textTransform: "uppercase" }}>Anthropic API Key</label>
+            <label style={{ color: "#aaa", fontSize: ".8rem", letterSpacing: ".1em", textTransform: "uppercase" }}>Gemini API Key</label>
             <input
               type="password"
               value={apiKey}
               onChange={e => setApiKey(e.target.value)}
-              placeholder="sk-ant-..."
+              placeholder="AIza..."
               style={{
                 width: "100%", marginTop: 8, marginBottom: ".5rem",
                 background: "#0d0d15", border: "1px solid #333", borderRadius: 8,
@@ -278,8 +287,8 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
               }}
             />
             <div style={{ color: "#444", fontSize: ".75rem", marginBottom: "1.5rem" }}>
-              僅儲存於瀏覽器記憶體，不會傳送至其他地方。前往{" "}
-              <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" style={{ color: "#6c63ff" }}>console.anthropic.com/settings/keys</a>{" "}取得。
+              僅儲存於瀏覽器記憶體，不會持久化保存。前往{" "}
+              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" style={{ color: "#6c63ff" }}>aistudio.google.com/app/apikey</a>{" "}取得。
             </div>
 
             <label style={{ color: "#aaa", fontSize: ".8rem", letterSpacing: ".1em", textTransform: "uppercase" }}>面試職位</label>
@@ -478,7 +487,7 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
             )}
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-            <button onClick={callClaude} disabled={isLoading || !currentAnswer.trim()} style={{
+            <button onClick={callGemini} disabled={isLoading || !currentAnswer.trim()} style={{
               flex: 1, background: isLoading || !currentAnswer.trim() ? "#111" : "linear-gradient(135deg, #4c44af, #7c63ef)",
               border: "none", borderRadius: 8, padding: "10px",
               color: isLoading || !currentAnswer.trim() ? "#333" : "#fff",
