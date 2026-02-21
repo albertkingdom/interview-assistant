@@ -258,13 +258,24 @@ export default function InterviewAssistant() {
   };
 
   const callGemini = async () => {
-    if (!currentAnswer.trim()) return;
+    const questionSnapshot = currentQuestion.trim();
+    const answerSnapshot = currentAnswer.trim();
+    if (!answerSnapshot) return;
     if (!apiKey.trim()) {
       setAiResult({ error: "請先輸入 Gemini API Key" });
       return;
     }
 
-    appendConversationIfNeeded(currentQuestion, currentAnswer);
+    appendConversationIfNeeded(questionSnapshot, answerSnapshot);
+    if (listeningTargetRef.current) {
+      shouldRestartRef.current = false;
+      safeStopRecognition(recognitionRef.current);
+      setTarget(null);
+    }
+    setCurrentQuestion("");
+    setCurrentAnswer("");
+    accumulatedRef.current = "";
+    setInterimText("");
 
     setIsLoading(true);
     setAiResult(null);
@@ -277,7 +288,7 @@ export default function InterviewAssistant() {
 重點主題：${customTopics.join("、")}
 已覆蓋主題：${coveredTopics.join("、") || "無"}
 
-${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答：${currentAnswer}`;
+${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答：${answerSnapshot}`;
 
     try {
       const resp = await fetch(
