@@ -244,12 +244,27 @@ export default function InterviewAssistant() {
     throw new Error("模型回傳格式不完整，請再試一次");
   };
 
+  const appendConversationIfNeeded = (questionInput, answerInput) => {
+    const question = questionInput.trim();
+    const answer = answerInput.trim();
+    if (!question || !answer) return;
+
+    setConversation((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.question === question && last?.answer === answer) return prev;
+      return [...prev, { question, answer }];
+    });
+    setTimeout(() => historyRef.current?.scrollTo({ top: 99999, behavior: "smooth" }), 100);
+  };
+
   const callGemini = async () => {
     if (!currentAnswer.trim()) return;
     if (!apiKey.trim()) {
       setAiResult({ error: "請先輸入 Gemini API Key" });
       return;
     }
+
+    appendConversationIfNeeded(currentQuestion, currentAnswer);
 
     setIsLoading(true);
     setAiResult(null);
@@ -314,18 +329,6 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const addToConversation = () => {
-    if (!currentQuestion.trim() || !currentAnswer.trim()) return;
-    setConversation(prev => [...prev, { question: currentQuestion, answer: currentAnswer }]);
-    setCurrentQuestion(aiResult?.nextQuestions?.[0] || "");
-    setCurrentAnswer("");
-    accumulatedRef.current = "";
-    setInterimText("");
-    setAiResult(null);
-    if (listeningTargetRef.current) { shouldRestartRef.current = false; safeStopRecognition(recognitionRef.current); setTarget(null); setInterimText(""); }
-    setTimeout(() => historyRef.current?.scrollTo({ top: 99999, behavior: "smooth" }), 100);
   };
 
   const scoreColor = (score) => {
@@ -573,25 +576,16 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
               </div>
             )}
           </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <div style={{ marginTop: 10 }}>
             <button onClick={callGemini} disabled={isLoading || !currentAnswer.trim()} style={{
-              flex: 1, background: isLoading || !currentAnswer.trim() ? "#111" : "linear-gradient(135deg, #4c44af, #7c63ef)",
+              width: "100%",
+              background: isLoading || !currentAnswer.trim() ? "#111" : "linear-gradient(135deg, #4c44af, #7c63ef)",
               border: "none", borderRadius: 8, padding: "10px",
               color: isLoading || !currentAnswer.trim() ? "#333" : "#fff",
               cursor: isLoading || !currentAnswer.trim() ? "not-allowed" : "pointer",
               fontWeight: 600, fontSize: ".9rem", fontFamily: "inherit"
             }}>
               {isLoading ? "分析中..." : "⚡ AI 分析"}
-            </button>
-            <button onClick={addToConversation} disabled={!currentQuestion.trim() || !currentAnswer.trim()} style={{
-              flex: 1, background: (!currentQuestion.trim() || !currentAnswer.trim()) ? "#111" : "#1a2e1a",
-              border: `1px solid ${(!currentQuestion.trim() || !currentAnswer.trim()) ? "#1a1a1a" : "#2a4a2a"}`,
-              borderRadius: 8, padding: "10px",
-              color: (!currentQuestion.trim() || !currentAnswer.trim()) ? "#333" : "#4ade80",
-              cursor: (!currentQuestion.trim() || !currentAnswer.trim()) ? "not-allowed" : "pointer",
-              fontWeight: 600, fontSize: ".9rem", fontFamily: "inherit"
-            }}>
-              記錄 + 繼續 →
             </button>
           </div>
         </div>
