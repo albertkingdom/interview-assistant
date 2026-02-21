@@ -66,8 +66,17 @@ export default function InterviewAssistant() {
   const [interimText, setInterimText] = useState(""); // live interim display
   const recognitionRef = useRef(null);
   const accumulatedRef = useRef("");
+  const currentQuestionRef = useRef("");
+  const currentAnswerRef = useRef("");
   const listeningTargetRef = useRef(null); // mirror for use inside callbacks
+  const latestInterimRef = useRef({ question: "", answer: "" });
+  const flushPendingInterimRef = useRef(() => {});
   const shouldRestartRef = useRef(false);  // auto-restart flag
+  const restartTimerRef = useRef(null);
+  const restartAttemptRef = useRef(0);
+  const watchdogTimerRef = useRef(null);
+  const lastRecognitionEventAtRef = useRef(0);
+  const sessionStartedAtRef = useRef(0);
   const answerRef = useRef(null);
   const historyRef = useRef(null);
 
@@ -76,12 +85,84 @@ export default function InterviewAssistant() {
     setListeningTarget(val);
   };
 
+  const mergeTranscript = (baseText = "", appendedText = "") => {
+    if (!appendedText) return baseText;
+    if (!baseText) return appendedText;
+    if (baseText.endsWith(appendedText)) return baseText;
+    if (appendedText.startsWith(baseText)) return appendedText;
+
+    const maxOverlap = Math.min(baseText.length, appendedText.length);
+    for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+      if (baseText.slice(-overlap) === appendedText.slice(0, overlap)) {
+        return baseText + appendedText.slice(overlap);
+      }
+    }
+    return baseText + appendedText;
+  };
+
+  const stabilizeInterim = (previousInterim = "", nextInterim = "") => {
+    if (!previousInterim || !nextInterim) return nextInterim;
+    if (previousInterim.length > nextInterim.length && previousInterim.startsWith(nextInterim)) {
+      return previousInterim;
+    }
+    return nextInterim;
+  };
+
+  const resolveStableFieldText = (target, candidateText) => {
+    const fieldText = target === "question" ? currentQuestionRef.current : currentAnswerRef.current;
+    if (!fieldText) return candidateText;
+    if (!candidateText) return fieldText;
+    if (candidateText.includes(fieldText)) return candidateText;
+    if (fieldText.includes(candidateText)) return fieldText;
+    return candidateText.length >= fieldText.length ? candidateText : fieldText;
+  };
+
+  const setTargetText = (target, text) => {
+    if (target === "question") {
+      currentQuestionRef.current = text;
+      setCurrentQuestion(text);
+    } else if (target === "answer") {
+      currentAnswerRef.current = text;
+      setCurrentAnswer(text);
+    }
+  };
+
+  const flushPendingInterim = (target = listeningTargetRef.current) => {
+    if (!target) return;
+    const pendingInterim = latestInterimRef.current[target] || "";
+    const mergedText = mergeTranscript(accumulatedRef.current || "", pendingInterim);
+    const resolvedText = resolveStableFieldText(target, mergedText);
+    accumulatedRef.current = resolvedText;
+    setTargetText(target, resolvedText);
+    latestInterimRef.current[target] = "";
+    setInterimText("");
+  };
+  flushPendingInterimRef.current = flushPendingInterim;
+
+  useEffect(() => {
+    currentQuestionRef.current = currentQuestion;
+  }, [currentQuestion]);
+
+  useEffect(() => {
+    currentAnswerRef.current = currentAnswer;
+  }, [currentAnswer]);
+
+  const clearRestartTimer = () => {
+    if (restartTimerRef.current) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+  };
+
   const safeStartRecognition = (recognition) => {
     if (!recognition) return;
     try {
       recognition.start();
+      restartAttemptRef.current = 0;
+      return true;
     } catch (err) {
       console.debug("SpeechRecognition start ignored:", err);
+      return false;
     }
   };
 
@@ -103,49 +184,127 @@ export default function InterviewAssistant() {
     recognition.continuous = true;
     recognition.interimResults = true;
 
+    const scheduleRestart = (baseDelayMs = 350) => {
+      if (!shouldRestartRef.current) return;
+      clearRestartTimer();
+      const attempt = restartAttemptRef.current;
+      const delay = Math.min(baseDelayMs + attempt * 350, 3000);
+      restartTimerRef.current = setTimeout(() => {
+        restartTimerRef.current = null;
+        if (!shouldRestartRef.current) return;
+        const started = safeStartRecognition(recognition);
+        if (!started) {
+          restartAttemptRef.current += 1;
+          scheduleRestart(700);
+        }
+      }, delay);
+    };
+
+    const clearWatchdog = () => {
+      if (watchdogTimerRef.current) {
+        clearInterval(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
+    };
+
+    const touchRecognitionEvent = () => {
+      lastRecognitionEventAtRef.current = Date.now();
+    };
+
+    recognition.onstart = () => {
+      touchRecognitionEvent();
+      sessionStartedAtRef.current = Date.now();
+      restartAttemptRef.current = 0;
+    };
+
     recognition.onresult = (e) => {
+      touchRecognitionEvent();
       let newFinal = "";
       let interim = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
         if (e.results[i].isFinal) newFinal += e.results[i][0].transcript;
         else interim += e.results[i][0].transcript;
       }
+      const target = listeningTargetRef.current;
+      const previousInterim = target ? latestInterimRef.current[target] : "";
+      const stabilizedInterim = newFinal ? "" : stabilizeInterim(previousInterim, interim);
       if (newFinal) {
-        accumulatedRef.current += newFinal;
+        accumulatedRef.current = mergeTranscript(accumulatedRef.current, newFinal);
         setInterimText("");
       } else {
-        setInterimText(interim);
+        setInterimText(stabilizedInterim);
       }
-      const target = listeningTargetRef.current;
-      if (target === "question") setCurrentQuestion(accumulatedRef.current + (newFinal ? "" : interim));
-      else if (target === "answer") setCurrentAnswer(accumulatedRef.current + (newFinal ? "" : interim));
+      if (target) {
+        if (newFinal) latestInterimRef.current[target] = "";
+        else latestInterimRef.current[target] = stabilizedInterim;
+      }
+      if (target === "question" || target === "answer") {
+        const merged = mergeTranscript(accumulatedRef.current, stabilizedInterim);
+        const resolvedText = resolveStableFieldText(target, merged);
+        setTargetText(target, resolvedText);
+      }
+      restartAttemptRef.current = 0;
     };
 
     recognition.onerror = (e) => {
-      // "no-speech" is not a fatal error — just restart
-      if (e.error === "no-speech" && shouldRestartRef.current) {
-        safeStartRecognition(recognition);
-      } else if (e.error !== "aborted") {
+      touchRecognitionEvent();
+      // Browser can end long sessions; restart with backoff to avoid dead stops.
+      if (e.error === "aborted") return;
+      if (e.error === "not-allowed" || e.error === "service-not-allowed" || e.error === "audio-capture") {
+        flushPendingInterimRef.current();
         shouldRestartRef.current = false;
         setTarget(null);
         setInterimText("");
+        clearRestartTimer();
+        return;
+      }
+      if (shouldRestartRef.current) {
+        flushPendingInterimRef.current();
+        scheduleRestart(e.error === "no-speech" ? 300 : 700);
+      } else {
+        setTarget(null);
       }
     };
 
     recognition.onend = () => {
+      touchRecognitionEvent();
       setInterimText("");
       // Auto-restart if user hasn't manually stopped
       if (shouldRestartRef.current) {
-        safeStartRecognition(recognition);
+        flushPendingInterimRef.current();
+        scheduleRestart(450);
       } else {
         setTarget(null);
+        clearRestartTimer();
       }
     };
 
     recognitionRef.current = recognition;
+    clearWatchdog();
+    watchdogTimerRef.current = setInterval(() => {
+      if (!shouldRestartRef.current || !listeningTargetRef.current) return;
+      const now = Date.now();
+      const last = lastRecognitionEventAtRef.current || 0;
+      const startedAt = sessionStartedAtRef.current || now;
+      const stalled = last && now - last > 7000;
+      const sessionTooLong = now - startedAt > 45000;
+      // Chrome SpeechRecognition can silently stall; rotate session on stall or long-running session.
+      if (stalled || sessionTooLong) {
+        flushPendingInterimRef.current();
+        touchRecognitionEvent();
+        sessionStartedAtRef.current = now;
+        clearRestartTimer();
+        safeStopRecognition(recognition);
+        scheduleRestart(300);
+      }
+    }, 1500);
 
     return () => {
       shouldRestartRef.current = false;
+      clearRestartTimer();
+      clearWatchdog();
+      sessionStartedAtRef.current = 0;
+      recognition.onstart = null;
       recognition.onresult = null;
       recognition.onerror = null;
       recognition.onend = null;
@@ -158,22 +317,35 @@ export default function InterviewAssistant() {
     if (!recognitionRef.current) return;
     if (listeningTargetRef.current === target) {
       // Manual stop
+      flushPendingInterim(target);
       shouldRestartRef.current = false;
+      clearRestartTimer();
       safeStopRecognition(recognitionRef.current);
       setTarget(null);
       setInterimText("");
     } else {
       // Stop existing if any
+      flushPendingInterim();
       shouldRestartRef.current = false;
+      clearRestartTimer();
       safeStopRecognition(recognitionRef.current);
       // Seed accumulated from current field
       accumulatedRef.current = target === "question" ? currentQuestion : currentAnswer;
       setInterimText("");
       setTimeout(() => {
         shouldRestartRef.current = true;
+        restartAttemptRef.current = 0;
         setTarget(target);
         safeStartRecognition(recognitionRef.current);
       }, 200);
+    }
+  };
+
+  const handoffToCandidateAnswer = () => {
+    answerRef.current?.focus();
+    if (!recognitionRef.current) return;
+    if (listeningTargetRef.current !== "answer") {
+      toggleListening("answer");
     }
   };
 
@@ -350,7 +522,9 @@ export default function InterviewAssistant() {
 
   const finishInterviewAndExport = () => {
     if (listeningTargetRef.current) {
+      flushPendingInterim();
       shouldRestartRef.current = false;
+      clearRestartTimer();
       safeStopRecognition(recognitionRef.current);
       setTarget(null);
       setInterimText("");
@@ -384,12 +558,16 @@ export default function InterviewAssistant() {
 
     appendConversationIfNeeded(questionSnapshot, answerSnapshot);
     if (listeningTargetRef.current) {
+      flushPendingInterim();
       shouldRestartRef.current = false;
+      clearRestartTimer();
       safeStopRecognition(recognitionRef.current);
       setTarget(null);
     }
     setCurrentQuestion("");
     setCurrentAnswer("");
+    currentQuestionRef.current = "";
+    currentAnswerRef.current = "";
     accumulatedRef.current = "";
     setInterimText("");
 
@@ -655,7 +833,16 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
             </div>
             <input
               value={currentQuestion}
-              onChange={e => setCurrentQuestion(e.target.value)}
+              onChange={(e) => {
+                currentQuestionRef.current = e.target.value;
+                setCurrentQuestion(e.target.value);
+              }}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  handoffToCandidateAnswer();
+                }
+              }}
               placeholder="輸入或語音說出你的問題..."
               style={{
                 width: "100%", background: "#111120",
@@ -664,6 +851,27 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
                 fontSize: ".95rem", fontFamily: "inherit", transition: "border-color .2s"
               }}
             />
+            <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <span style={{ color: "#4e4e68", fontSize: ".72rem" }}>快捷鍵：Cmd/Ctrl + Enter</span>
+              <button
+                type="button"
+                onClick={handoffToCandidateAnswer}
+                disabled={!currentQuestion.trim()}
+                style={{
+                  background: currentQuestion.trim() ? "#142034" : "#111",
+                  border: `1px solid ${currentQuestion.trim() ? "#213652" : "#1a1a1a"}`,
+                  borderRadius: 6,
+                  padding: "5px 10px",
+                  color: currentQuestion.trim() ? "#9ec1f7" : "#333",
+                  fontSize: ".75rem",
+                  cursor: currentQuestion.trim() ? "pointer" : "not-allowed",
+                  fontFamily: "inherit",
+                  transition: "all .2s"
+                }}
+              >
+                問完 → 轉到面試者錄音
+              </button>
+            </div>
             {listeningTarget === "question" && interimText && (
               <div style={{ marginTop: 4, padding: "4px 10px", background: "#1a1a30", borderRadius: 6, color: "#7060c0", fontSize: ".8rem", fontStyle: "italic" }}>
                 ⏳ {interimText}
@@ -688,7 +896,10 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
             <textarea
               ref={answerRef}
               value={currentAnswer}
-              onChange={e => setCurrentAnswer(e.target.value)}
+              onChange={(e) => {
+                currentAnswerRef.current = e.target.value;
+                setCurrentAnswer(e.target.value);
+              }}
               placeholder="輸入或語音記錄面試者說了什麼重點..."
               rows={3}
               style={{
@@ -792,7 +1003,10 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
               <div style={{ color: "#666", fontSize: ".72rem", letterSpacing: ".1em", marginBottom: 10 }}>建議下一個問題</div>
               {aiResult.nextQuestions?.map((q, i) => (
                 <div key={i} style={{ marginBottom: 8 }}>
-                  <button onClick={() => setCurrentQuestion(q)} style={{
+                  <button onClick={() => {
+                    currentQuestionRef.current = q;
+                    setCurrentQuestion(q);
+                  }} style={{
                     background: "none", border: "none", textAlign: "left",
                     color: "#c8c0e0", fontSize: ".85rem", lineHeight: 1.5, cursor: "pointer",
                     padding: "8px 10px", borderRadius: 6, width: "100%",
