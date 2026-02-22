@@ -18,7 +18,7 @@ export const createRealtimeTranscriptionSession = async (options = {}) => {
       },
       body: JSON.stringify({
         model: options.model || "gpt-4o-mini-transcribe",
-        language: options.language || "zh",
+        ...(typeof options.language === "string" ? { language: options.language } : {}),
         prompt: options.prompt || "",
         includeLogprobs: Boolean(options.includeLogprobs),
         noiseReductionType: options.noiseReductionType || "near_field",

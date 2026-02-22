@@ -35,7 +35,8 @@ const parseJsonSafely = async (request) => {
 
 const buildSessionPayload = (input = {}) => {
   const model = String(input.model || DEFAULT_MODEL).trim();
-  const language = typeof input.language === "string" ? input.language.trim() : "zh";
+  const languageRaw = typeof input.language === "string" ? input.language.trim() : "";
+  const language = languageRaw === "auto" ? "" : languageRaw || "zh";
   const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
   const includeLogprobs = Boolean(input.includeLogprobs);
   const noiseReductionType =
@@ -56,7 +57,7 @@ const buildSessionPayload = (input = {}) => {
     input_audio_format: "pcm16",
     input_audio_transcription: {
       model,
-      language: language || "zh",
+      ...(language ? { language } : {}),
       ...(prompt ? { prompt } : {}),
     },
     input_audio_noise_reduction: {

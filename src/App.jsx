@@ -69,7 +69,7 @@ export default function InterviewAssistant() {
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
   const [exportStatus, setExportStatus] = useState("");
-  const [sttEngine, setSttEngine] = useState("browser");
+  const [sttEngine, setSttEngine] = useState("openai-realtime");
   const [realtimeStatus, setRealtimeStatus] = useState("idle");
   // listeningTarget: null | "question" | "answer"
   const [listeningTarget, setListeningTarget] = useState(null);
@@ -92,7 +92,7 @@ export default function InterviewAssistant() {
   const safeStartRecognitionRef = useRef(() => false);
   const safeStopRecognitionRef = useRef(() => {});
   const realtimeTranscriberRef = useRef(null);
-  const sttEngineRef = useRef("browser");
+  const sttEngineRef = useRef("openai-realtime");
   const shouldRestartRef = useRef(false);  // auto-restart flag
   const restartTimerRef = useRef(null);
   const restartAttemptRef = useRef(0);
@@ -459,13 +459,19 @@ export default function InterviewAssistant() {
 
     const transcriber = ensureRealtimeTranscriber();
     try {
-      const language = speechLangMode === "en-US" ? "en" : "zh";
+      const language =
+        speechLangMode === "en-US" ? "en" : speechLangMode === "zh-TW" ? "zh" : "auto";
       await transcriber.start({
         model: "gpt-4o-mini-transcribe",
         language,
         includeLogprobs: false,
         noiseReductionType: "near_field",
         silenceDurationMs: 900,
+        audioConfig: {
+          autoGainControl: audioInputConfig.autoGainControl,
+          noiseSuppression: audioInputConfig.noiseSuppression,
+          echoCancellation: true,
+        },
       });
     } catch (err) {
       stopMicMonitor();
@@ -1294,7 +1300,7 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
                   fontFamily: "inherit"
                 }}
               >
-                辨識語言：中英混合
+                辨識語言：{sttEngine === "openai-realtime" ? "自動" : "中英混合"}
               </button>
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

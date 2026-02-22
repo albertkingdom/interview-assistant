@@ -49,12 +49,13 @@ export class OpenAIRealtimeTranscriber {
         this.emit("onStatus", { state: pc.connectionState });
       };
 
+      const audioConfig = config.audioConfig || {};
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          noiseSuppression: true,
-          autoGainControl: true,
-          echoCancellation: true,
+          noiseSuppression: audioConfig.noiseSuppression ?? true,
+          autoGainControl: audioConfig.autoGainControl ?? true,
+          echoCancellation: audioConfig.echoCancellation ?? true,
         },
       });
       this.stream = stream;
