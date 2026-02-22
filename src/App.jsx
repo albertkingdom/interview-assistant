@@ -23,6 +23,8 @@ export default function InterviewAssistant() {
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
   const [exportStatus, setExportStatus] = useState("");
+  const [showDetailControls, setShowDetailControls] = useState(false);
+  const [quickActionStep, setQuickActionStep] = useState(0); // 0: question, 1: answer, 2: save+background analyze+continue
   const [sttEngine, setSttEngine] = useState("openai-realtime");
   const [realtimeStatus, setRealtimeStatus] = useState("idle");
   // listeningTarget: null | "question" | "answer"
@@ -68,6 +70,7 @@ export default function InterviewAssistant() {
   const mixedPreferredLangRef = useRef("zh-TW");
   const answerRef = useRef(null);
   const historyRef = useRef(null);
+  const analysisInFlightRef = useRef(false);
 
   const setTarget = (val) => {
     listeningTargetRef.current = val;
@@ -449,6 +452,22 @@ export default function InterviewAssistant() {
     setInterimText("");
   };
 
+  const stopActiveListening = async () => {
+    if (!listeningTargetRef.current) return;
+    if (sttEngineRef.current === "openai-realtime") {
+      await stopRealtimeListening();
+      return;
+    }
+    flushPendingInterim();
+    shouldRestartRef.current = false;
+    clearRestartTimer();
+    stopMicMonitor();
+    lastFinalAtRef.current = 0;
+    safeStopRecognitionRef.current(recognitionRef.current);
+    setTarget(null);
+    setInterimText("");
+  };
+
   const safeStartRecognition = (recognition) => {
     if (!recognition) return;
     try {
@@ -767,16 +786,35 @@ export default function InterviewAssistant() {
     setTimeout(() => historyRef.current?.scrollTo({ top: 99999, behavior: "smooth" }), 100);
   };
 
-  const buildInterviewRecord = () => {
+  const buildConversationSnapshot = (questionInput = currentQuestionRef.current, answerInput = currentAnswerRef.current) => {
     const items = [...conversation];
-    const pendingQuestion = currentQuestion.trim();
-    const pendingAnswer = currentAnswer.trim();
-    if (pendingQuestion && pendingAnswer) {
-      const last = items[items.length - 1];
-      if (!(last?.question === pendingQuestion && last?.answer === pendingAnswer)) {
-        items.push({ question: pendingQuestion, answer: pendingAnswer });
-      }
-    }
+    const pendingQuestion = questionInput.trim();
+    const pendingAnswer = answerInput.trim();
+    if (!pendingQuestion || !pendingAnswer) return items;
+
+    const last = items[items.length - 1];
+    if (last?.question === pendingQuestion && last?.answer === pendingAnswer) return items;
+    return [...items, { question: pendingQuestion, answer: pendingAnswer }];
+  };
+
+  const clearCurrentTurnInputs = () => {
+    setCurrentQuestion("");
+    setCurrentAnswer("");
+    currentQuestionRef.current = "";
+    currentAnswerRef.current = "";
+    accumulatedRef.current = "";
+    latestInterimRef.current.question = "";
+    latestInterimRef.current.answer = "";
+    setInterimText("");
+  };
+
+  const buildInterviewRecord = ({
+    questionSnapshot = currentQuestionRef.current,
+    answerSnapshot = currentAnswerRef.current,
+    conversationSnapshot,
+    aiSummarySnapshot = aiResult
+  } = {}) => {
+    const items = conversationSnapshot || buildConversationSnapshot(questionSnapshot, answerSnapshot);
 
     return {
       id: String(Date.now()),
@@ -785,7 +823,7 @@ export default function InterviewAssistant() {
       topics: [...customTopics],
       coveredTopics: [...coveredTopics],
       conversation: items,
-      aiSummary: aiResult && !aiResult.error ? aiResult : null
+      aiSummary: aiSummarySnapshot && !aiSummarySnapshot.error ? aiSummarySnapshot : null
     };
   };
 
@@ -857,20 +895,7 @@ export default function InterviewAssistant() {
   };
 
   const finishInterviewAndExport = async () => {
-    if (listeningTargetRef.current) {
-      if (sttEngineRef.current === "openai-realtime") {
-        await stopRealtimeListening();
-      } else {
-        flushPendingInterim();
-        shouldRestartRef.current = false;
-        clearRestartTimer();
-        stopMicMonitor();
-        lastFinalAtRef.current = 0;
-        safeStopRecognitionRef.current(recognitionRef.current);
-        setTarget(null);
-        setInterimText("");
-      }
-    }
+    await stopActiveListening();
 
     const record = buildInterviewRecord();
     if (record.conversation.length === 0) {
@@ -889,32 +914,32 @@ export default function InterviewAssistant() {
     }
   };
 
-  const callGemini = async () => {
-    const questionSnapshot = currentQuestion.trim();
-    const answerSnapshot = currentAnswer.trim();
-    if (!answerSnapshot) return;
-
-    appendConversationIfNeeded(questionSnapshot, answerSnapshot);
-    if (listeningTargetRef.current) {
-      if (sttEngineRef.current === "openai-realtime") {
-        await stopRealtimeListening();
-      } else {
-        flushPendingInterim();
-        shouldRestartRef.current = false;
-        clearRestartTimer();
-        stopMicMonitor();
-        lastFinalAtRef.current = 0;
-        safeStopRecognitionRef.current(recognitionRef.current);
-        setTarget(null);
+  const callGemini = async ({
+    questionSnapshot = currentQuestionRef.current,
+    answerSnapshot = currentAnswerRef.current,
+    conversationSnapshot,
+    mode = "manual" // manual | background
+  } = {}) => {
+    const questionText = questionSnapshot.trim();
+    const answerText = answerSnapshot.trim();
+    if (analysisInFlightRef.current) {
+      if (mode === "background") {
+        setExportStatus("背景分析仍在進行，已略過本次分析");
       }
+      return false;
     }
-    setCurrentQuestion("");
-    setCurrentAnswer("");
-    currentQuestionRef.current = "";
-    currentAnswerRef.current = "";
-    accumulatedRef.current = "";
-    setInterimText("");
 
+    const payloadConversation = conversationSnapshot || buildConversationSnapshot(questionText, answerText);
+    if (!answerText) return false;
+
+    appendConversationIfNeeded(questionText, answerText);
+    if (mode === "manual") {
+      await stopActiveListening();
+      clearCurrentTurnInputs();
+      setQuickActionStep(0);
+    }
+
+    analysisInFlightRef.current = true;
     setIsLoading(true);
     setAiResult(null);
 
@@ -931,8 +956,8 @@ export default function InterviewAssistant() {
           jobTitle,
           customTopics,
           coveredTopics,
-          conversation,
-          latestAnswer: answerSnapshot,
+          conversation: payloadConversation,
+          latestAnswer: answerText,
         })
       });
 
@@ -957,8 +982,66 @@ export default function InterviewAssistant() {
       const msg = e?.message || "未知錯誤";
       setAiResult({ error: `分析失敗：${msg}` });
     } finally {
+      analysisInFlightRef.current = false;
       setIsLoading(false);
     }
+    return true;
+  };
+
+  const runQuickAction = async () => {
+    if (quickActionStep === 0) {
+      if (listeningTargetRef.current !== "question") {
+        await toggleListening("question");
+      }
+      setExportStatus("快速流程：請錄面試官問題");
+      setQuickActionStep(1);
+      return;
+    }
+
+    if (quickActionStep === 1) {
+      if (listeningTargetRef.current !== "answer") {
+        await toggleListening("answer");
+      }
+      setExportStatus("快速流程：請錄面試者回答");
+      setQuickActionStep(2);
+      return;
+    }
+
+    flushPendingInterim();
+    const questionSnapshot = currentQuestionRef.current.trim();
+    const answerSnapshot = currentAnswerRef.current.trim();
+    if (!answerSnapshot) {
+      setExportStatus("快速流程：尚未有面試者回答，請先錄音");
+      return;
+    }
+
+    const conversationSnapshot = buildConversationSnapshot(questionSnapshot, answerSnapshot);
+    const record = buildInterviewRecord({ questionSnapshot, answerSnapshot, conversationSnapshot });
+    if (record.conversation.length === 0) {
+      setExportStatus("快速流程：尚無對話可儲存");
+      return;
+    }
+
+    try {
+      saveInterviewRecord(record);
+      setExportStatus("已儲存面試紀錄，背景 AI 分析中，可直接錄下一題");
+    } catch (err) {
+      console.error(err);
+      setExportStatus("儲存紀錄失敗，仍嘗試進行 AI 分析");
+    }
+
+    clearCurrentTurnInputs();
+    if (listeningTargetRef.current !== "question") {
+      await toggleListening("question");
+    }
+    setQuickActionStep(1);
+
+    void callGemini({
+      questionSnapshot,
+      answerSnapshot,
+      conversationSnapshot,
+      mode: "background"
+    });
   };
 
   const scoreColor = (score) => {
@@ -977,12 +1060,13 @@ export default function InterviewAssistant() {
       <div style={{
         minHeight: "100vh", background: "#0a0a0f",
         display: "flex", alignItems: "center", justifyContent: "center",
-        fontFamily: "'Noto Serif TC', Georgia, serif",
+        fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif",
         padding: "2rem"
       }}>
         <style>{`
-          @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap');
+          @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap');
           * { box-sizing: border-box; }
+          * { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
           ::-webkit-scrollbar { width: 4px; }
           ::-webkit-scrollbar-track { background: #111; }
           ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
@@ -1058,13 +1142,14 @@ export default function InterviewAssistant() {
   return (
     <div style={{
       minHeight: "100vh", background: "#0a0a0f", color: "#e8e0d0",
-      fontFamily: "'Noto Serif TC', Georgia, serif",
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif",
       display: "grid", gridTemplateColumns: "1fr 340px", gridTemplateRows: "auto 1fr",
       height: "100vh", overflow: "hidden"
     }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap');
         * { box-sizing: border-box; }
+        * { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: #0d0d14; }
         ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
@@ -1123,135 +1208,188 @@ export default function InterviewAssistant() {
 
         {/* Input area */}
         <div style={{ padding: "16px 24px", background: "#0d0d14", borderTop: "1px solid #1a1a28" }}>
-          <div style={{ marginBottom: 12, padding: "8px 10px", background: "#10101a", border: "1px solid #1b1b2a", borderRadius: 8 }}>
-            <div style={{ color: "#7a7a90", fontSize: ".7rem", letterSpacing: ".08em", marginBottom: 8 }}>
-              錄音前處理參數
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-              <button
-                type="button"
-                onClick={() => setSttEngine("browser")}
-                style={{
-                  background: sttEngine === "browser" ? "#2a1a40" : "#1a1a2a",
-                  border: `1px solid ${sttEngine === "browser" ? "#a78bfa" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: sttEngine === "browser" ? "#cdb6ff" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                STT：瀏覽器
-              </button>
-              <button
-                type="button"
-                onClick={() => setSttEngine("openai-realtime")}
-                style={{
-                  background: sttEngine === "openai-realtime" ? "#173022" : "#1a1a2a",
-                  border: `1px solid ${sttEngine === "openai-realtime" ? "#2d7a52" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: sttEngine === "openai-realtime" ? "#6ee7a8" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                STT：OpenAI Realtime
-              </button>
-              {sttEngine === "openai-realtime" && (
-                <span style={{ color: "#4e4e68", fontSize: ".72rem", alignSelf: "center" }}>
-                  狀態：{realtimeStatus}
-                </span>
-              )}
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-              <button
-                type="button"
-                onClick={() => setSpeechLangMode("zh-TW")}
-                style={{
-                  background: speechLangMode === "zh-TW" ? "#1f2f4f" : "#1a1a2a",
-                  border: `1px solid ${speechLangMode === "zh-TW" ? "#2f5fa0" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: speechLangMode === "zh-TW" ? "#9ec1f7" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                辨識語言：中文
-              </button>
-              <button
-                type="button"
-                onClick={() => setSpeechLangMode("en-US")}
-                style={{
-                  background: speechLangMode === "en-US" ? "#1f2f4f" : "#1a1a2a",
-                  border: `1px solid ${speechLangMode === "en-US" ? "#2f5fa0" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: speechLangMode === "en-US" ? "#9ec1f7" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                辨識語言：英文
-              </button>
-              <button
-                type="button"
-                onClick={() => setSpeechLangMode("mixed")}
-                style={{
-                  background: speechLangMode === "mixed" ? "#1f2f4f" : "#1a1a2a",
-                  border: `1px solid ${speechLangMode === "mixed" ? "#2f5fa0" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: speechLangMode === "mixed" ? "#9ec1f7" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                辨識語言：{sttEngine === "openai-realtime" ? "自動" : "中英混合"}
-              </button>
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button
-                type="button"
-                onClick={() => toggleAudioInputConfig("autoGainControl")}
-                style={{
-                  background: audioInputConfig.autoGainControl ? "#173022" : "#1a1a2a",
-                  border: `1px solid ${audioInputConfig.autoGainControl ? "#2d7a52" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: audioInputConfig.autoGainControl ? "#6ee7a8" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                自動增益 AGC：{audioInputConfig.autoGainControl ? "開" : "關"}
-              </button>
-              <button
-                type="button"
-                onClick={() => toggleAudioInputConfig("noiseSuppression")}
-                style={{
-                  background: audioInputConfig.noiseSuppression ? "#173022" : "#1a1a2a",
-                  border: `1px solid ${audioInputConfig.noiseSuppression ? "#2d7a52" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: audioInputConfig.noiseSuppression ? "#6ee7a8" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                降噪 NS：{audioInputConfig.noiseSuppression ? "開" : "關"}
-              </button>
-            </div>
-            <div style={{ marginTop: 6, color: "#4e4e68", fontSize: ".7rem", lineHeight: 1.4 }}>
-              不同瀏覽器可能忽略部分設定，建議錄音中邊講邊觀察辨識結果。停頓超過 1.1 秒會自動換行。
+          <div style={{ marginBottom: 12 }}>
+            <button
+              type="button"
+              onClick={() => setShowDetailControls((prev) => !prev)}
+              style={{
+                width: "100%",
+                background: showDetailControls ? "#1c2234" : "#12121d",
+                border: `1px solid ${showDetailControls ? "#2e3c62" : "#1f1f30"}`,
+                borderRadius: 8,
+                padding: "9px 12px",
+                color: showDetailControls ? "#c7d6f6" : "#8a8aa5",
+                fontSize: ".8rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                fontFamily: "inherit",
+                textAlign: "left"
+              }}
+            >
+              {showDetailControls ? "▾ 細節調整（已展開）" : "▸ 細節調整"}
+            </button>
+            {showDetailControls && (
+              <div style={{ marginTop: 8, padding: "8px 10px", background: "#10101a", border: "1px solid #1b1b2a", borderRadius: 8 }}>
+                <div style={{ color: "#7a7a90", fontSize: ".7rem", letterSpacing: ".08em", marginBottom: 8 }}>
+                  錄音前處理參數
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => setSttEngine("browser")}
+                    style={{
+                      background: sttEngine === "browser" ? "#2a1a40" : "#1a1a2a",
+                      border: `1px solid ${sttEngine === "browser" ? "#a78bfa" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: sttEngine === "browser" ? "#cdb6ff" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    STT：瀏覽器
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSttEngine("openai-realtime")}
+                    style={{
+                      background: sttEngine === "openai-realtime" ? "#173022" : "#1a1a2a",
+                      border: `1px solid ${sttEngine === "openai-realtime" ? "#2d7a52" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: sttEngine === "openai-realtime" ? "#6ee7a8" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    STT：OpenAI Realtime
+                  </button>
+                  {sttEngine === "openai-realtime" && (
+                    <span style={{ color: "#4e4e68", fontSize: ".72rem", alignSelf: "center" }}>
+                      狀態：{realtimeStatus}
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => setSpeechLangMode("zh-TW")}
+                    style={{
+                      background: speechLangMode === "zh-TW" ? "#1f2f4f" : "#1a1a2a",
+                      border: `1px solid ${speechLangMode === "zh-TW" ? "#2f5fa0" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: speechLangMode === "zh-TW" ? "#9ec1f7" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    辨識語言：中文
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSpeechLangMode("en-US")}
+                    style={{
+                      background: speechLangMode === "en-US" ? "#1f2f4f" : "#1a1a2a",
+                      border: `1px solid ${speechLangMode === "en-US" ? "#2f5fa0" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: speechLangMode === "en-US" ? "#9ec1f7" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    辨識語言：英文
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSpeechLangMode("mixed")}
+                    style={{
+                      background: speechLangMode === "mixed" ? "#1f2f4f" : "#1a1a2a",
+                      border: `1px solid ${speechLangMode === "mixed" ? "#2f5fa0" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: speechLangMode === "mixed" ? "#9ec1f7" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    辨識語言：{sttEngine === "openai-realtime" ? "自動" : "中英混合"}
+                  </button>
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => toggleAudioInputConfig("autoGainControl")}
+                    style={{
+                      background: audioInputConfig.autoGainControl ? "#173022" : "#1a1a2a",
+                      border: `1px solid ${audioInputConfig.autoGainControl ? "#2d7a52" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: audioInputConfig.autoGainControl ? "#6ee7a8" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    自動增益 AGC：{audioInputConfig.autoGainControl ? "開" : "關"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleAudioInputConfig("noiseSuppression")}
+                    style={{
+                      background: audioInputConfig.noiseSuppression ? "#173022" : "#1a1a2a",
+                      border: `1px solid ${audioInputConfig.noiseSuppression ? "#2d7a52" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: audioInputConfig.noiseSuppression ? "#6ee7a8" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    降噪 NS：{audioInputConfig.noiseSuppression ? "開" : "關"}
+                  </button>
+                </div>
+                <div style={{ marginTop: 6, color: "#4e4e68", fontSize: ".7rem", lineHeight: 1.4 }}>
+                  不同瀏覽器可能忽略部分設定，建議錄音中邊講邊觀察辨識結果。停頓超過 1.1 秒會自動換行。
+                </div>
+              </div>
+            )}
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <button
+              type="button"
+              onClick={runQuickAction}
+              style={{
+                width: "100%",
+                background: quickActionStep === 0
+                  ? "linear-gradient(135deg, #2a3f77, #4567b2)"
+                  : quickActionStep === 1
+                    ? "linear-gradient(135deg, #2a5b36, #3f8a55)"
+                    : "linear-gradient(135deg, #6b3c15, #c9732a)",
+                border: "none",
+                borderRadius: 10,
+                padding: "11px 12px",
+                color: "#fff",
+                fontWeight: 700,
+                fontSize: ".88rem",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                letterSpacing: ".02em"
+              }}
+            >
+              {quickActionStep === 0 && "① 開始錄面試官問題"}
+              {quickActionStep === 1 && "② 轉到面試者回答錄音"}
+              {quickActionStep === 2 && "③ 儲存紀錄 + 背景AI分析 + 繼續下一題"}
+            </button>
+            <div style={{ marginTop: 6, color: "#5a5a74", fontSize: ".72rem", lineHeight: 1.4 }}>
+              快速模式：連按三次即可完成一輪，AI 分析在背景進行，不中斷下一題錄音。
             </div>
           </div>
           <div style={{ marginBottom: 10 }}>
