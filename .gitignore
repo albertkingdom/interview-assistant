@@ -29,6 +29,7 @@ dist-ssr
 !.env.example
 server/.dev.vars
 server/.dev.vars.*
+!server/.dev.vars.example
 
 # Test and coverage outputs
 coverage

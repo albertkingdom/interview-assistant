@@ -26,12 +26,14 @@
 ## Environment Variables / Secrets
 - Required:
   - `OPENAI_API_KEY` (Worker secret)
+  - `GEMINI_API_KEY` (Worker secret)
 - Optional:
   - `ALLOWED_ORIGIN` (frontend domain for CORS check)
   - `RATE_LIMIT_PER_MINUTE` (soft protection)
 
 Set via dashboard or CLI:
 - `wrangler secret put OPENAI_API_KEY`
+- `wrangler secret put GEMINI_API_KEY`
 
 ## Example `wrangler.toml` (Draft)
 ```toml
