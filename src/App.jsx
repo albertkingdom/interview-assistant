@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { OpenAIRealtimeTranscriber } from "./lib/openaiRealtimeTranscriber";
 
 const SYSTEM_PROMPT = `你是一位資深面試輔助 AI，協助面試官在面試過程中做出更好的判斷與提問。
 
@@ -68,6 +69,8 @@ export default function InterviewAssistant() {
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
   const [exportStatus, setExportStatus] = useState("");
+  const [sttEngine, setSttEngine] = useState("browser");
+  const [realtimeStatus, setRealtimeStatus] = useState("idle");
   // listeningTarget: null | "question" | "answer"
   const [listeningTarget, setListeningTarget] = useState(null);
   const [interimText, setInterimText] = useState(""); // live interim display
@@ -88,6 +91,8 @@ export default function InterviewAssistant() {
   const appendFinalChunkRef = useRef((baseText = "") => baseText);
   const safeStartRecognitionRef = useRef(() => false);
   const safeStopRecognitionRef = useRef(() => {});
+  const realtimeTranscriberRef = useRef(null);
+  const sttEngineRef = useRef("browser");
   const shouldRestartRef = useRef(false);  // auto-restart flag
   const restartTimerRef = useRef(null);
   const restartAttemptRef = useRef(0);
@@ -213,6 +218,35 @@ export default function InterviewAssistant() {
       console.debug("Audio constraint update ignored:", err);
     });
   }, [audioInputConfig]);
+
+  useEffect(() => {
+    sttEngineRef.current = sttEngine;
+    setMicWarning("");
+    stopMicMonitor();
+    lastFinalAtRef.current = 0;
+    setTarget(null);
+    setInterimText("");
+    if (sttEngine === "openai-realtime") {
+      shouldRestartRef.current = false;
+      clearRestartTimer();
+      safeStopRecognitionRef.current(recognitionRef.current);
+      setRealtimeStatus("idle");
+    } else {
+      const transcriber = realtimeTranscriberRef.current;
+      if (transcriber) {
+        void transcriber.stop();
+      }
+      setRealtimeStatus("idle");
+    }
+  }, [sttEngine]);
+
+  useEffect(() => () => {
+    const transcriber = realtimeTranscriberRef.current;
+    if (transcriber) {
+      void transcriber.stop();
+      realtimeTranscriberRef.current = null;
+    }
+  }, []);
 
   const clearRestartTimer = () => {
     if (restartTimerRef.current) {
@@ -352,6 +386,109 @@ export default function InterviewAssistant() {
     }));
   };
 
+  const handleRealtimeInterim = (rawText) => {
+    const target = listeningTargetRef.current;
+    if (!target) return;
+    const text = rawText || "";
+    const previousInterim = latestInterimRef.current[target] || "";
+    const stabilizedInterim = stabilizeInterim(previousInterim, text);
+    latestInterimRef.current[target] = stabilizedInterim;
+    setInterimText(stabilizedInterim);
+    const merged = mergeTranscript(accumulatedRef.current, stabilizedInterim);
+    const resolvedText = resolveStableFieldText(target, merged);
+    setTargetText(target, resolvedText);
+  };
+
+  const handleRealtimeFinal = (rawText) => {
+    const target = listeningTargetRef.current;
+    if (!target) return;
+    const text = rawText || "";
+    if (!text.trim()) return;
+    const now = Date.now();
+    const shouldLineBreak = Boolean(
+      accumulatedRef.current &&
+      lastFinalAtRef.current &&
+      now - lastFinalAtRef.current > PAUSE_LINE_BREAK_MS
+    );
+    accumulatedRef.current = appendFinalChunkRef.current(accumulatedRef.current, text, shouldLineBreak);
+    lastFinalAtRef.current = now;
+    latestInterimRef.current[target] = "";
+    setInterimText("");
+    const resolvedText = resolveStableFieldText(target, accumulatedRef.current);
+    setTargetText(target, resolvedText);
+    updateMixedPreferredLang(resolvedText);
+  };
+
+  const ensureRealtimeTranscriber = () => {
+    if (realtimeTranscriberRef.current) return realtimeTranscriberRef.current;
+    const transcriber = new OpenAIRealtimeTranscriber({
+      onStatus: (payload) => {
+        const nextState = payload?.state || "unknown";
+        setRealtimeStatus(nextState);
+        if (nextState === "connected") setMicWarning("");
+      },
+      onInterim: (text) => {
+        handleRealtimeInterim(text);
+      },
+      onFinal: (text) => {
+        handleRealtimeFinal(text);
+      },
+      onError: (err) => {
+        const msg = err instanceof Error ? err.message : String(err || "Unknown error");
+        setRealtimeStatus("error");
+        setMicWarning(`Realtime 轉寫異常：${msg}`);
+      },
+    });
+    realtimeTranscriberRef.current = transcriber;
+    return transcriber;
+  };
+
+  const startRealtimeListening = async (target) => {
+    flushPendingInterim();
+    shouldRestartRef.current = false;
+    clearRestartTimer();
+    safeStopRecognitionRef.current(recognitionRef.current);
+    stopMicMonitor();
+
+    accumulatedRef.current = target === "question" ? currentQuestionRef.current : currentAnswerRef.current;
+    latestInterimRef.current[target] = "";
+    lastFinalAtRef.current = Date.now();
+    setInterimText("");
+    setTarget(target);
+    startMicMonitor();
+
+    const transcriber = ensureRealtimeTranscriber();
+    try {
+      const language = speechLangMode === "en-US" ? "en" : "zh";
+      await transcriber.start({
+        model: "gpt-4o-mini-transcribe",
+        language,
+        includeLogprobs: false,
+        noiseReductionType: "near_field",
+        silenceDurationMs: 900,
+      });
+    } catch (err) {
+      stopMicMonitor();
+      setTarget(null);
+      setInterimText("");
+      latestInterimRef.current[target] = "";
+      const msg = err instanceof Error ? err.message : String(err || "Unknown error");
+      setMicWarning(`Realtime 連線失敗：${msg}`);
+    }
+  };
+
+  const stopRealtimeListening = async (target = listeningTargetRef.current) => {
+    flushPendingInterim(target);
+    stopMicMonitor();
+    lastFinalAtRef.current = 0;
+    const transcriber = realtimeTranscriberRef.current;
+    if (transcriber) {
+      await transcriber.stop();
+    }
+    setTarget(null);
+    setInterimText("");
+  };
+
   const safeStartRecognition = (recognition) => {
     if (!recognition) return;
     try {
@@ -415,6 +552,7 @@ export default function InterviewAssistant() {
     };
 
     recognition.onstart = () => {
+      if (sttEngineRef.current !== "browser") return;
       touchRecognitionEvent();
       sessionStartedAtRef.current = Date.now();
       restartAttemptRef.current = 0;
@@ -422,6 +560,7 @@ export default function InterviewAssistant() {
     };
 
     recognition.onresult = (e) => {
+      if (sttEngineRef.current !== "browser") return;
       touchRecognitionEvent();
       let newFinal = "";
       let interim = "";
@@ -460,6 +599,7 @@ export default function InterviewAssistant() {
     };
 
     recognition.onerror = (e) => {
+      if (sttEngineRef.current !== "browser") return;
       touchRecognitionEvent();
       // Browser can end long sessions; restart with backoff to avoid dead stops.
       if (e.error === "aborted") return;
@@ -484,6 +624,7 @@ export default function InterviewAssistant() {
     };
 
     recognition.onend = () => {
+      if (sttEngineRef.current !== "browser") return;
       touchRecognitionEvent();
       setInterimText("");
       // Auto-restart if user hasn't manually stopped
@@ -534,7 +675,16 @@ export default function InterviewAssistant() {
     };
   }, []);
 
-  const toggleListening = (target) => {
+  const toggleListening = async (target) => {
+    if (sttEngineRef.current === "openai-realtime") {
+      if (listeningTargetRef.current === target) {
+        await stopRealtimeListening(target);
+      } else {
+        await startRealtimeListening(target);
+      }
+      return;
+    }
+
     if (!recognitionRef.current) return;
     if (listeningTargetRef.current === target) {
       // Manual stop
@@ -569,9 +719,9 @@ export default function InterviewAssistant() {
 
   const handoffToCandidateAnswer = () => {
     answerRef.current?.focus();
-    if (!recognitionRef.current) return;
+    if (sttEngineRef.current !== "openai-realtime" && !recognitionRef.current) return;
     if (listeningTargetRef.current !== "answer") {
-      toggleListening("answer");
+      void toggleListening("answer");
     }
   };
 
@@ -746,16 +896,20 @@ export default function InterviewAssistant() {
     URL.revokeObjectURL(url);
   };
 
-  const finishInterviewAndExport = () => {
+  const finishInterviewAndExport = async () => {
     if (listeningTargetRef.current) {
-      flushPendingInterim();
-      shouldRestartRef.current = false;
-      clearRestartTimer();
-      stopMicMonitor();
-      lastFinalAtRef.current = 0;
-      safeStopRecognitionRef.current(recognitionRef.current);
-      setTarget(null);
-      setInterimText("");
+      if (sttEngineRef.current === "openai-realtime") {
+        await stopRealtimeListening();
+      } else {
+        flushPendingInterim();
+        shouldRestartRef.current = false;
+        clearRestartTimer();
+        stopMicMonitor();
+        lastFinalAtRef.current = 0;
+        safeStopRecognitionRef.current(recognitionRef.current);
+        setTarget(null);
+        setInterimText("");
+      }
     }
 
     const record = buildInterviewRecord();
@@ -786,13 +940,17 @@ export default function InterviewAssistant() {
 
     appendConversationIfNeeded(questionSnapshot, answerSnapshot);
     if (listeningTargetRef.current) {
-      flushPendingInterim();
-      shouldRestartRef.current = false;
-      clearRestartTimer();
-      stopMicMonitor();
-      lastFinalAtRef.current = 0;
-      safeStopRecognitionRef.current(recognitionRef.current);
-      setTarget(null);
+      if (sttEngineRef.current === "openai-realtime") {
+        await stopRealtimeListening();
+      } else {
+        flushPendingInterim();
+        shouldRestartRef.current = false;
+        clearRestartTimer();
+        stopMicMonitor();
+        lastFinalAtRef.current = 0;
+        safeStopRecognitionRef.current(recognitionRef.current);
+        setTarget(null);
+      }
     }
     setCurrentQuestion("");
     setCurrentAnswer("");
@@ -1049,6 +1207,45 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
           <div style={{ marginBottom: 12, padding: "8px 10px", background: "#10101a", border: "1px solid #1b1b2a", borderRadius: 8 }}>
             <div style={{ color: "#7a7a90", fontSize: ".7rem", letterSpacing: ".08em", marginBottom: 8 }}>
               錄音前處理參數
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <button
+                type="button"
+                onClick={() => setSttEngine("browser")}
+                style={{
+                  background: sttEngine === "browser" ? "#2a1a40" : "#1a1a2a",
+                  border: `1px solid ${sttEngine === "browser" ? "#a78bfa" : "#333"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  color: sttEngine === "browser" ? "#cdb6ff" : "#666",
+                  fontSize: ".75rem",
+                  cursor: "pointer",
+                  fontFamily: "inherit"
+                }}
+              >
+                STT：瀏覽器
+              </button>
+              <button
+                type="button"
+                onClick={() => setSttEngine("openai-realtime")}
+                style={{
+                  background: sttEngine === "openai-realtime" ? "#173022" : "#1a1a2a",
+                  border: `1px solid ${sttEngine === "openai-realtime" ? "#2d7a52" : "#333"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  color: sttEngine === "openai-realtime" ? "#6ee7a8" : "#666",
+                  fontSize: ".75rem",
+                  cursor: "pointer",
+                  fontFamily: "inherit"
+                }}
+              >
+                STT：OpenAI Realtime
+              </button>
+              {sttEngine === "openai-realtime" && (
+                <span style={{ color: "#4e4e68", fontSize: ".72rem", alignSelf: "center" }}>
+                  狀態：{realtimeStatus}
+                </span>
+              )}
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
               <button

@@ -1,16 +1,72 @@
-# React + Vite
+# Interview Assistant
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Interview helper app (React + Vite) with voice input and AI analysis.
 
-Currently, two official plugins are available:
+## Project Structure
+- `src/`: frontend app
+- `server/`: Cloudflare Worker API (`/api/realtime/session`) for OpenAI Realtime ephemeral session creation
+- `docs/`: implementation and deployment notes
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Prerequisites
+- Node.js 20+
+- npm
+- Cloudflare account (for Worker deploy)
 
-## React Compiler
+## Local Development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### 1) Install frontend deps
+```bash
+npm install
+```
 
-## Expanding the ESLint configuration
+### 2) Install Worker deps
+```bash
+npm --prefix server install
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+### 3) Configure environment
+- Frontend:
+  - Copy `.env.example` to `.env`
+  - Adjust `VITE_API_BASE_URL` if needed
+- Worker:
+  - Copy `server/.dev.vars.example` to `server/.dev.vars`
+  - Set `OPENAI_API_KEY`
+
+### 4) Run services
+- Terminal A (frontend):
+```bash
+npm run dev:client
+```
+- Terminal B (worker API):
+```bash
+npm run dev:server
+```
+
+Frontend dev server proxies `/api/*` to `http://127.0.0.1:8787`.
+
+## Worker Endpoint
+
+### `POST /api/realtime/session`
+Creates an OpenAI Realtime transcription session (default model: `gpt-4o-mini-transcribe`).
+
+Example request:
+```json
+{
+  "model": "gpt-4o-mini-transcribe",
+  "language": "zh",
+  "noiseReductionType": "near_field",
+  "silenceDurationMs": 900,
+  "includeLogprobs": false
+}
+```
+
+## Scripts
+- `npm run dev` / `npm run dev:client`: run frontend
+- `npm run dev:server`: run Worker locally via Wrangler
+- `npm run build`: build frontend
+- `npm run lint`: lint frontend code
+- `npm run check:worker`: dry-run Worker deploy
+
+## Deployment
+- Worker deploy notes: `docs/deploy-cloudflare-workers.md`
+- WebRTC/STT implementation plan: `docs/plan-webrtc-gpt-4o-mini-transcribe.md`
