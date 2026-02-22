@@ -1,10 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { OpenAIRealtimeTranscriber } from "./lib/openaiRealtimeTranscriber";
 import { mergeTranscript, appendFinalChunk, stabilizeInterim } from "./utils/transcriptUtils";
-import { parseAiJson } from "./utils/aiJsonUtils";
 import { buildMarkdownFromRecord } from "./utils/recordUtils";
-import { requestGeminiAnalysis } from "./services/geminiAnalysisService";
 import { saveInterviewRecordToStorage } from "./services/recordStorageService";
+import { useAiAnalysis } from "./hooks/useAiAnalysis";
 
 const TOPICS_DEFAULT = ["技術能力", "過去經驗", "問題解決", "團隊合作", "自我驅動", "職涯規劃"];
 const RECORDS_STORAGE_KEY = "interview-assistant.records.v1";
@@ -22,8 +21,6 @@ export default function InterviewAssistant() {
   const [conversation, setConversation] = useState([]);
   const [currentAnswer, setCurrentAnswer] = useState("");
   const [currentQuestion, setCurrentQuestion] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [aiResult, setAiResult] = useState(null);
   const [coveredTopics, setCoveredTopics] = useState([]);
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
@@ -78,7 +75,6 @@ export default function InterviewAssistant() {
   const mixedPreferredLangRef = useRef("zh-TW");
   const answerRef = useRef(null);
   const historyRef = useRef(null);
-  const analysisInFlightRef = useRef(false);
 
   const setTarget = (val) => {
     listeningTargetRef.current = val;
@@ -741,6 +737,20 @@ export default function InterviewAssistant() {
     };
   };
 
+  const { isLoading, aiResult, callGemini } = useAiAnalysis({
+    jobTitle,
+    customTopics,
+    coveredTopics,
+    onAppendConversation: appendConversationIfNeeded,
+    onBeforeManualAnalysis: async () => {
+      await stopActiveListening();
+      clearCurrentTurnInputs();
+      setQuickActionStep(0);
+    },
+    onBackgroundSkipped: () => setExportStatus("背景分析仍在進行，已略過本次分析"),
+    onUpdateCoveredTopics: setCoveredTopics
+  });
+
   const downloadMarkdown = (record, markdown) => {
     const safeJobTitle = record.jobTitle.replace(/[\\/:*?"<>|]/g, "-");
     const timestamp = record.createdAt.replace(/[:]/g, "-").replace(/\.\d{3}Z$/, "");
@@ -776,63 +786,17 @@ export default function InterviewAssistant() {
     }
   };
 
-  const callGemini = async ({
-    questionSnapshot = currentQuestionRef.current,
-    answerSnapshot = currentAnswerRef.current,
-    conversationSnapshot,
-    mode = "manual" // manual | background
-  } = {}) => {
-    const questionText = questionSnapshot.trim();
-    const answerText = answerSnapshot.trim();
-    if (analysisInFlightRef.current) {
-      if (mode === "background") {
-        setExportStatus("背景分析仍在進行，已略過本次分析");
-      }
-      return false;
-    }
-
-    const payloadConversation = conversationSnapshot || buildConversationSnapshot(questionText, answerText);
-    if (!answerText) return false;
-
-    appendConversationIfNeeded(questionText, answerText);
-    if (mode === "manual") {
-      await stopActiveListening();
-      clearCurrentTurnInputs();
-      setQuickActionStep(0);
-    }
-
-    analysisInFlightRef.current = true;
-    setIsLoading(true);
-    setAiResult(null);
-
-    try {
-      const data = await requestGeminiAnalysis({
-        jobTitle,
-        customTopics,
-        coveredTopics,
-        conversation: payloadConversation,
-        latestAnswer: answerText
-      });
-
-      const text = data?.text || "{}";
-      const parsed = parseAiJson(text);
-      setAiResult(parsed);
-
-      // Auto-detect covered topics
-      if (parsed.uncoveredTopics) {
-        const uncovered = new Set(parsed.uncoveredTopics);
-        const newCovered = customTopics.filter(t => !uncovered.has(t));
-        setCoveredTopics(newCovered);
-      }
-    } catch (e) {
-      console.error(e);
-      const msg = e?.message || "未知錯誤";
-      setAiResult({ error: `分析失敗：${msg}` });
-    } finally {
-      analysisInFlightRef.current = false;
-      setIsLoading(false);
-    }
-    return true;
+  const runManualAnalysis = async () => {
+    flushPendingInterim();
+    const questionSnapshot = currentQuestionRef.current.trim();
+    const answerSnapshot = currentAnswerRef.current.trim();
+    const conversationSnapshot = buildConversationSnapshot(questionSnapshot, answerSnapshot);
+    await callGemini({
+      questionSnapshot,
+      answerSnapshot,
+      conversationSnapshot,
+      mode: "manual"
+    });
   };
 
   const runQuickAction = async () => {
@@ -1375,7 +1339,7 @@ export default function InterviewAssistant() {
             )}
           </div>
           <div style={{ marginTop: 10 }}>
-            <button onClick={callGemini} disabled={isLoading || !currentAnswer.trim()} style={{
+            <button onClick={runManualAnalysis} disabled={isLoading || !currentAnswer.trim()} style={{
               width: "100%",
               background: isLoading || !currentAnswer.trim() ? "#111" : "linear-gradient(135deg, #4c44af, #7c63ef)",
               border: "none", borderRadius: 8, padding: "10px",
