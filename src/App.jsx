@@ -1060,12 +1060,13 @@ export default function InterviewAssistant() {
       <div style={{
         minHeight: "100vh", background: "#0a0a0f",
         display: "flex", alignItems: "center", justifyContent: "center",
-        fontFamily: "'Noto Serif TC', Georgia, serif",
+        fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif",
         padding: "2rem"
       }}>
         <style>{`
-          @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap');
+          @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap');
           * { box-sizing: border-box; }
+          * { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
           ::-webkit-scrollbar { width: 4px; }
           ::-webkit-scrollbar-track { background: #111; }
           ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
@@ -1141,13 +1142,14 @@ export default function InterviewAssistant() {
   return (
     <div style={{
       minHeight: "100vh", background: "#0a0a0f", color: "#e8e0d0",
-      fontFamily: "'Noto Serif TC', Georgia, serif",
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif",
       display: "grid", gridTemplateColumns: "1fr 340px", gridTemplateRows: "auto 1fr",
       height: "100vh", overflow: "hidden"
     }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap');
         * { box-sizing: border-box; }
+        * { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: #0d0d14; }
         ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
