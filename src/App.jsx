@@ -23,7 +23,7 @@ export default function InterviewAssistant() {
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
   const [exportStatus, setExportStatus] = useState("");
-  const [quickActionStep, setQuickActionStep] = useState(0); // 0: question, 1: answer, 2: save+analyze
+  const [quickActionStep, setQuickActionStep] = useState(0); // 0: question, 1: answer, 2: save+background analyze+continue
   const [sttEngine, setSttEngine] = useState("openai-realtime");
   const [realtimeStatus, setRealtimeStatus] = useState("idle");
   // listeningTarget: null | "question" | "answer"
@@ -69,6 +69,7 @@ export default function InterviewAssistant() {
   const mixedPreferredLangRef = useRef("zh-TW");
   const answerRef = useRef(null);
   const historyRef = useRef(null);
+  const analysisInFlightRef = useRef(false);
 
   const setTarget = (val) => {
     listeningTargetRef.current = val;
@@ -784,16 +785,35 @@ export default function InterviewAssistant() {
     setTimeout(() => historyRef.current?.scrollTo({ top: 99999, behavior: "smooth" }), 100);
   };
 
-  const buildInterviewRecord = () => {
+  const buildConversationSnapshot = (questionInput = currentQuestionRef.current, answerInput = currentAnswerRef.current) => {
     const items = [...conversation];
-    const pendingQuestion = currentQuestion.trim();
-    const pendingAnswer = currentAnswer.trim();
-    if (pendingQuestion && pendingAnswer) {
-      const last = items[items.length - 1];
-      if (!(last?.question === pendingQuestion && last?.answer === pendingAnswer)) {
-        items.push({ question: pendingQuestion, answer: pendingAnswer });
-      }
-    }
+    const pendingQuestion = questionInput.trim();
+    const pendingAnswer = answerInput.trim();
+    if (!pendingQuestion || !pendingAnswer) return items;
+
+    const last = items[items.length - 1];
+    if (last?.question === pendingQuestion && last?.answer === pendingAnswer) return items;
+    return [...items, { question: pendingQuestion, answer: pendingAnswer }];
+  };
+
+  const clearCurrentTurnInputs = () => {
+    setCurrentQuestion("");
+    setCurrentAnswer("");
+    currentQuestionRef.current = "";
+    currentAnswerRef.current = "";
+    accumulatedRef.current = "";
+    latestInterimRef.current.question = "";
+    latestInterimRef.current.answer = "";
+    setInterimText("");
+  };
+
+  const buildInterviewRecord = ({
+    questionSnapshot = currentQuestionRef.current,
+    answerSnapshot = currentAnswerRef.current,
+    conversationSnapshot,
+    aiSummarySnapshot = aiResult
+  } = {}) => {
+    const items = conversationSnapshot || buildConversationSnapshot(questionSnapshot, answerSnapshot);
 
     return {
       id: String(Date.now()),
@@ -802,7 +822,7 @@ export default function InterviewAssistant() {
       topics: [...customTopics],
       coveredTopics: [...coveredTopics],
       conversation: items,
-      aiSummary: aiResult && !aiResult.error ? aiResult : null
+      aiSummary: aiSummarySnapshot && !aiSummarySnapshot.error ? aiSummarySnapshot : null
     };
   };
 
@@ -893,20 +913,32 @@ export default function InterviewAssistant() {
     }
   };
 
-  const callGemini = async () => {
-    const questionSnapshot = currentQuestion.trim();
-    const answerSnapshot = currentAnswer.trim();
-    if (!answerSnapshot) return;
+  const callGemini = async ({
+    questionSnapshot = currentQuestionRef.current,
+    answerSnapshot = currentAnswerRef.current,
+    conversationSnapshot,
+    mode = "manual" // manual | background
+  } = {}) => {
+    const questionText = questionSnapshot.trim();
+    const answerText = answerSnapshot.trim();
+    if (analysisInFlightRef.current) {
+      if (mode === "background") {
+        setExportStatus("背景分析仍在進行，已略過本次分析");
+      }
+      return false;
+    }
 
-    appendConversationIfNeeded(questionSnapshot, answerSnapshot);
-    await stopActiveListening();
-    setCurrentQuestion("");
-    setCurrentAnswer("");
-    currentQuestionRef.current = "";
-    currentAnswerRef.current = "";
-    accumulatedRef.current = "";
-    setInterimText("");
+    const payloadConversation = conversationSnapshot || buildConversationSnapshot(questionText, answerText);
+    if (!answerText) return false;
 
+    appendConversationIfNeeded(questionText, answerText);
+    if (mode === "manual") {
+      await stopActiveListening();
+      clearCurrentTurnInputs();
+      setQuickActionStep(0);
+    }
+
+    analysisInFlightRef.current = true;
     setIsLoading(true);
     setAiResult(null);
 
@@ -923,8 +955,8 @@ export default function InterviewAssistant() {
           jobTitle,
           customTopics,
           coveredTopics,
-          conversation,
-          latestAnswer: answerSnapshot,
+          conversation: payloadConversation,
+          latestAnswer: answerText,
         })
       });
 
@@ -949,14 +981,13 @@ export default function InterviewAssistant() {
       const msg = e?.message || "未知錯誤";
       setAiResult({ error: `分析失敗：${msg}` });
     } finally {
+      analysisInFlightRef.current = false;
       setIsLoading(false);
-      setQuickActionStep(0);
     }
+    return true;
   };
 
   const runQuickAction = async () => {
-    if (isLoading) return;
-
     if (quickActionStep === 0) {
       if (listeningTargetRef.current !== "question") {
         await toggleListening("question");
@@ -975,15 +1006,16 @@ export default function InterviewAssistant() {
       return;
     }
 
+    flushPendingInterim();
+    const questionSnapshot = currentQuestionRef.current.trim();
     const answerSnapshot = currentAnswerRef.current.trim();
     if (!answerSnapshot) {
       setExportStatus("快速流程：尚未有面試者回答，請先錄音");
       return;
     }
 
-    await stopActiveListening();
-
-    const record = buildInterviewRecord();
+    const conversationSnapshot = buildConversationSnapshot(questionSnapshot, answerSnapshot);
+    const record = buildInterviewRecord({ questionSnapshot, answerSnapshot, conversationSnapshot });
     if (record.conversation.length === 0) {
       setExportStatus("快速流程：尚無對話可儲存");
       return;
@@ -991,14 +1023,24 @@ export default function InterviewAssistant() {
 
     try {
       saveInterviewRecord(record);
-      setExportStatus("已儲存面試紀錄，開始 AI 分析...");
+      setExportStatus("已儲存面試紀錄，背景 AI 分析中，可直接錄下一題");
     } catch (err) {
       console.error(err);
       setExportStatus("儲存紀錄失敗，仍嘗試進行 AI 分析");
     }
 
-    await callGemini();
-    setQuickActionStep(0);
+    clearCurrentTurnInputs();
+    if (listeningTargetRef.current !== "question") {
+      await toggleListening("question");
+    }
+    setQuickActionStep(1);
+
+    void callGemini({
+      questionSnapshot,
+      answerSnapshot,
+      conversationSnapshot,
+      mode: "background"
+    });
   };
 
   const scoreColor = (score) => {
@@ -1298,33 +1340,30 @@ export default function InterviewAssistant() {
             <button
               type="button"
               onClick={runQuickAction}
-              disabled={isLoading}
               style={{
                 width: "100%",
-                background: isLoading
-                  ? "#111"
-                  : quickActionStep === 0
-                    ? "linear-gradient(135deg, #2a3f77, #4567b2)"
-                    : quickActionStep === 1
-                      ? "linear-gradient(135deg, #2a5b36, #3f8a55)"
-                      : "linear-gradient(135deg, #6b3c15, #c9732a)",
+                background: quickActionStep === 0
+                  ? "linear-gradient(135deg, #2a3f77, #4567b2)"
+                  : quickActionStep === 1
+                    ? "linear-gradient(135deg, #2a5b36, #3f8a55)"
+                    : "linear-gradient(135deg, #6b3c15, #c9732a)",
                 border: "none",
                 borderRadius: 10,
                 padding: "11px 12px",
-                color: isLoading ? "#333" : "#fff",
+                color: "#fff",
                 fontWeight: 700,
                 fontSize: ".88rem",
-                cursor: isLoading ? "not-allowed" : "pointer",
+                cursor: "pointer",
                 fontFamily: "inherit",
                 letterSpacing: ".02em"
               }}
             >
               {quickActionStep === 0 && "① 開始錄面試官問題"}
               {quickActionStep === 1 && "② 轉到面試者回答錄音"}
-              {quickActionStep === 2 && "③ 儲存紀錄 + 中斷錄音 + AI分析"}
+              {quickActionStep === 2 && "③ 儲存紀錄 + 背景AI分析 + 繼續下一題"}
             </button>
             <div style={{ marginTop: 6, color: "#5a5a74", fontSize: ".72rem", lineHeight: 1.4 }}>
-              快速模式：連按三次即可完成一輪面試流程，適合現場快速操作。
+              快速模式：連按三次即可完成一輪，AI 分析在背景進行，不中斷下一題錄音。
             </div>
           </div>
           <div style={{ marginBottom: 10 }}>
