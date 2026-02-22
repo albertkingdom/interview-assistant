@@ -23,6 +23,7 @@ export default function InterviewAssistant() {
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
   const [exportStatus, setExportStatus] = useState("");
+  const [quickActionStep, setQuickActionStep] = useState(0); // 0: question, 1: answer, 2: save+analyze
   const [sttEngine, setSttEngine] = useState("openai-realtime");
   const [realtimeStatus, setRealtimeStatus] = useState("idle");
   // listeningTarget: null | "question" | "answer"
@@ -449,6 +450,22 @@ export default function InterviewAssistant() {
     setInterimText("");
   };
 
+  const stopActiveListening = async () => {
+    if (!listeningTargetRef.current) return;
+    if (sttEngineRef.current === "openai-realtime") {
+      await stopRealtimeListening();
+      return;
+    }
+    flushPendingInterim();
+    shouldRestartRef.current = false;
+    clearRestartTimer();
+    stopMicMonitor();
+    lastFinalAtRef.current = 0;
+    safeStopRecognitionRef.current(recognitionRef.current);
+    setTarget(null);
+    setInterimText("");
+  };
+
   const safeStartRecognition = (recognition) => {
     if (!recognition) return;
     try {
@@ -857,20 +874,7 @@ export default function InterviewAssistant() {
   };
 
   const finishInterviewAndExport = async () => {
-    if (listeningTargetRef.current) {
-      if (sttEngineRef.current === "openai-realtime") {
-        await stopRealtimeListening();
-      } else {
-        flushPendingInterim();
-        shouldRestartRef.current = false;
-        clearRestartTimer();
-        stopMicMonitor();
-        lastFinalAtRef.current = 0;
-        safeStopRecognitionRef.current(recognitionRef.current);
-        setTarget(null);
-        setInterimText("");
-      }
-    }
+    await stopActiveListening();
 
     const record = buildInterviewRecord();
     if (record.conversation.length === 0) {
@@ -895,19 +899,7 @@ export default function InterviewAssistant() {
     if (!answerSnapshot) return;
 
     appendConversationIfNeeded(questionSnapshot, answerSnapshot);
-    if (listeningTargetRef.current) {
-      if (sttEngineRef.current === "openai-realtime") {
-        await stopRealtimeListening();
-      } else {
-        flushPendingInterim();
-        shouldRestartRef.current = false;
-        clearRestartTimer();
-        stopMicMonitor();
-        lastFinalAtRef.current = 0;
-        safeStopRecognitionRef.current(recognitionRef.current);
-        setTarget(null);
-      }
-    }
+    await stopActiveListening();
     setCurrentQuestion("");
     setCurrentAnswer("");
     currentQuestionRef.current = "";
@@ -958,7 +950,55 @@ export default function InterviewAssistant() {
       setAiResult({ error: `分析失敗：${msg}` });
     } finally {
       setIsLoading(false);
+      setQuickActionStep(0);
     }
+  };
+
+  const runQuickAction = async () => {
+    if (isLoading) return;
+
+    if (quickActionStep === 0) {
+      if (listeningTargetRef.current !== "question") {
+        await toggleListening("question");
+      }
+      setExportStatus("快速流程：請錄面試官問題");
+      setQuickActionStep(1);
+      return;
+    }
+
+    if (quickActionStep === 1) {
+      if (listeningTargetRef.current !== "answer") {
+        await toggleListening("answer");
+      }
+      setExportStatus("快速流程：請錄面試者回答");
+      setQuickActionStep(2);
+      return;
+    }
+
+    const answerSnapshot = currentAnswerRef.current.trim();
+    if (!answerSnapshot) {
+      setExportStatus("快速流程：尚未有面試者回答，請先錄音");
+      return;
+    }
+
+    await stopActiveListening();
+
+    const record = buildInterviewRecord();
+    if (record.conversation.length === 0) {
+      setExportStatus("快速流程：尚無對話可儲存");
+      return;
+    }
+
+    try {
+      saveInterviewRecord(record);
+      setExportStatus("已儲存面試紀錄，開始 AI 分析...");
+    } catch (err) {
+      console.error(err);
+      setExportStatus("儲存紀錄失敗，仍嘗試進行 AI 分析");
+    }
+
+    await callGemini();
+    setQuickActionStep(0);
   };
 
   const scoreColor = (score) => {
@@ -1252,6 +1292,39 @@ export default function InterviewAssistant() {
             </div>
             <div style={{ marginTop: 6, color: "#4e4e68", fontSize: ".7rem", lineHeight: 1.4 }}>
               不同瀏覽器可能忽略部分設定，建議錄音中邊講邊觀察辨識結果。停頓超過 1.1 秒會自動換行。
+            </div>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <button
+              type="button"
+              onClick={runQuickAction}
+              disabled={isLoading}
+              style={{
+                width: "100%",
+                background: isLoading
+                  ? "#111"
+                  : quickActionStep === 0
+                    ? "linear-gradient(135deg, #2a3f77, #4567b2)"
+                    : quickActionStep === 1
+                      ? "linear-gradient(135deg, #2a5b36, #3f8a55)"
+                      : "linear-gradient(135deg, #6b3c15, #c9732a)",
+                border: "none",
+                borderRadius: 10,
+                padding: "11px 12px",
+                color: isLoading ? "#333" : "#fff",
+                fontWeight: 700,
+                fontSize: ".88rem",
+                cursor: isLoading ? "not-allowed" : "pointer",
+                fontFamily: "inherit",
+                letterSpacing: ".02em"
+              }}
+            >
+              {quickActionStep === 0 && "① 開始錄面試官問題"}
+              {quickActionStep === 1 && "② 轉到面試者回答錄音"}
+              {quickActionStep === 2 && "③ 儲存紀錄 + 中斷錄音 + AI分析"}
+            </button>
+            <div style={{ marginTop: 6, color: "#5a5a74", fontSize: ".72rem", lineHeight: 1.4 }}>
+              快速模式：連按三次即可完成一輪面試流程，適合現場快速操作。
             </div>
           </div>
           <div style={{ marginBottom: 10 }}>
