@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { OpenAIRealtimeTranscriber } from "./lib/openaiRealtimeTranscriber";
+import { mergeTranscript, appendFinalChunk, stabilizeInterim } from "./utils/transcriptUtils";
+import { parseAiJson } from "./utils/aiJsonUtils";
+import { buildMarkdownFromRecord } from "./utils/recordUtils";
 
 const TOPICS_DEFAULT = ["技術能力", "過去經驗", "問題解決", "團隊合作", "自我驅動", "職涯規劃"];
 const RECORDS_STORAGE_KEY = "interview-assistant.records.v1";
@@ -79,38 +82,7 @@ export default function InterviewAssistant() {
     listeningTargetRef.current = val;
     setListeningTarget(val);
   };
-
-  const mergeTranscript = (baseText = "", appendedText = "") => {
-    if (!appendedText) return baseText;
-    if (!baseText) return appendedText;
-    if (baseText.endsWith(appendedText)) return baseText;
-    if (appendedText.startsWith(baseText)) return appendedText;
-
-    const maxOverlap = Math.min(baseText.length, appendedText.length);
-    for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-      if (baseText.slice(-overlap) === appendedText.slice(0, overlap)) {
-        return baseText + appendedText.slice(overlap);
-      }
-    }
-    return baseText + appendedText;
-  };
-
-  const appendFinalChunk = (baseText = "", finalChunk = "", addLineBreak = false) => {
-    if (!finalChunk || !finalChunk.trim()) return baseText;
-    if (!baseText) return finalChunk.trimStart();
-    if (!addLineBreak) return mergeTranscript(baseText, finalChunk);
-    const baseWithBreak = baseText.endsWith("\n") ? baseText : `${baseText}\n`;
-    return mergeTranscript(baseWithBreak, finalChunk.trimStart());
-  };
   appendFinalChunkRef.current = appendFinalChunk;
-
-  const stabilizeInterim = (previousInterim = "", nextInterim = "") => {
-    if (!previousInterim || !nextInterim) return nextInterim;
-    if (previousInterim.length > nextInterim.length && previousInterim.startsWith(nextInterim)) {
-      return previousInterim;
-    }
-    return nextInterim;
-  };
 
   const resolveStableFieldText = (target, candidateText) => {
     const fieldText = target === "question" ? currentQuestionRef.current : currentAnswerRef.current;
@@ -713,75 +685,6 @@ export default function InterviewAssistant() {
     }
   };
 
-  const escapeControlCharsInString = (text) => {
-    let result = "";
-    let inString = false;
-    let escaped = false;
-
-    for (const char of text) {
-      if (escaped) {
-        result += char;
-        escaped = false;
-        continue;
-      }
-
-      if (char === "\\") {
-        result += char;
-        escaped = true;
-        continue;
-      }
-
-      if (char === "\"") {
-        result += char;
-        inString = !inString;
-        continue;
-      }
-
-      if (inString && (char === "\n" || char === "\r")) {
-        result += "\\n";
-        continue;
-      }
-
-      if (inString && char === "\t") {
-        result += "\\t";
-        continue;
-      }
-
-      result += char;
-    }
-
-    return result;
-  };
-
-  const extractJsonObjectText = (text) => {
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start === -1 || end === -1 || end <= start) return text;
-    return text.slice(start, end + 1);
-  };
-
-  const parseAiJson = (rawText) => {
-    if (!rawText) return {};
-    const cleaned = rawText.replace(/```json|```/g, "").trim();
-    const jsonCandidates = [cleaned, extractJsonObjectText(cleaned)];
-
-    for (const candidate of jsonCandidates) {
-      if (!candidate) continue;
-      try {
-        return JSON.parse(candidate);
-      } catch {
-        const repaired = escapeControlCharsInString(candidate).replace(/,\s*([}\]])/g, "$1");
-        try {
-          return JSON.parse(repaired);
-        } catch {
-          // continue to try next candidate
-        }
-      }
-    }
-
-    throw new Error("模型回傳格式不完整，請再試一次");
-  };
-
   const appendConversationIfNeeded = (questionInput, answerInput) => {
     const question = questionInput.trim();
     const answer = answerInput.trim();
@@ -846,46 +749,6 @@ export default function InterviewAssistant() {
       console.error(err);
       throw new Error("儲存面試紀錄失敗");
     }
-  };
-
-  const formatDateTime = (isoString) => {
-    const d = new Date(isoString);
-    return d.toLocaleString("zh-TW", { hour12: false });
-  };
-
-  const buildMarkdownFromRecord = (record) => {
-    const lines = [
-      `# 面試紀錄 - ${record.jobTitle}`,
-      "",
-      `- 產生時間：${formatDateTime(record.createdAt)}`,
-      `- 面試主題：${record.topics.join("、") || "無"}`,
-      `- 已覆蓋主題：${record.coveredTopics.join("、") || "無"}`,
-      ""
-    ];
-
-    lines.push("## 對話紀錄", "");
-    record.conversation.forEach((turn, idx) => {
-      lines.push(`### 第 ${idx + 1} 輪`);
-      lines.push(`**面試官：** ${turn.question}`);
-      lines.push(`**面試者：** ${turn.answer}`);
-      lines.push("");
-    });
-
-    if (record.aiSummary) {
-      lines.push("## 最後一次 AI 分析", "");
-      lines.push(`- 品質分數：${record.aiSummary.quality?.score ?? "N/A"}`);
-      lines.push(`- 評級：${record.aiSummary.quality?.label ?? "N/A"}`);
-      lines.push(`- 評語：${record.aiSummary.quality?.comment ?? "N/A"}`);
-      lines.push("");
-      lines.push("### 建議下一題");
-      (record.aiSummary.nextQuestions || []).forEach((q, idx) => lines.push(`${idx + 1}. ${q}`));
-      lines.push("");
-      lines.push("### 尚未涵蓋主題");
-      (record.aiSummary.uncoveredTopics || []).forEach((t) => lines.push(`- ${t}`));
-      lines.push("");
-    }
-
-    return lines.join("\n");
   };
 
   const downloadMarkdown = (record, markdown) => {
