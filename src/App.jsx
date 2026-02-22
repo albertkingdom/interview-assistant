@@ -1,28 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { OpenAIRealtimeTranscriber } from "./lib/openaiRealtimeTranscriber";
 
-const SYSTEM_PROMPT = `你是一位資深面試輔助 AI，協助面試官在面試過程中做出更好的判斷與提問。
-
-你會收到：
-1. 目前面試職位與重點主題
-2. 到目前為止的對話紀錄（面試官問題 + 面試者回答摘要）
-3. 最新一則面試者的回答
-
-請用繁體中文輸出以下 JSON 格式（不加任何 markdown code block）：
-{
-  "quality": {
-    "score": 1-5的整數,
-    "label": "優秀/良好/普通/薄弱/迴避",
-    "comment": "一句話評語，20字以內"
-  },
-  "nextQuestions": [
-    "建議追問問題1（根據剛才的回答深挖）",
-    "建議問題2（轉換角度或方向）",
-    "建議問題3（引導面試者舉例或量化）"
-  ],
-  "uncoveredTopics": ["還沒問到的主題1", "還沒問到的主題2"]
-}`;
-
 const TOPICS_DEFAULT = ["技術能力", "過去經驗", "問題解決", "團隊合作", "自我驅動", "職涯規劃"];
 const RECORDS_STORAGE_KEY = "interview-assistant.records.v1";
 const WATCHDOG_INTERVAL_MS = 1500;
@@ -32,32 +10,8 @@ const LOW_VOLUME_RMS_THRESHOLD = 0.015;
 const LOW_VOLUME_HOLD_MS = 1800;
 const MIC_MONITOR_INTERVAL_MS = 350;
 const PAUSE_LINE_BREAK_MS = 1100;
-const GEMINI_RESPONSE_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    quality: {
-      type: "OBJECT",
-      properties: {
-        score: { type: "INTEGER" },
-        label: { type: "STRING" },
-        comment: { type: "STRING" }
-      },
-      required: ["score", "label", "comment"]
-    },
-    nextQuestions: {
-      type: "ARRAY",
-      items: { type: "STRING" }
-    },
-    uncoveredTopics: {
-      type: "ARRAY",
-      items: { type: "STRING" }
-    }
-  },
-  required: ["quality", "nextQuestions", "uncoveredTopics"]
-};
 
 export default function InterviewAssistant() {
-  const [apiKey, setApiKey] = useState("");
   const [jobTitle, setJobTitle] = useState("");
   const [customTopics, setCustomTopics] = useState(TOPICS_DEFAULT);
   const [conversation, setConversation] = useState([]);
@@ -939,10 +893,6 @@ export default function InterviewAssistant() {
     const questionSnapshot = currentQuestion.trim();
     const answerSnapshot = currentAnswer.trim();
     if (!answerSnapshot) return;
-    if (!apiKey.trim()) {
-      setAiResult({ error: "請先輸入 Gemini API Key" });
-      return;
-    }
 
     appendConversationIfNeeded(questionSnapshot, answerSnapshot);
     if (listeningTargetRef.current) {
@@ -968,50 +918,31 @@ export default function InterviewAssistant() {
     setIsLoading(true);
     setAiResult(null);
 
-    const historyText = conversation.map((c, i) =>
-      `第${i + 1}輪\n面試官：${c.question}\n面試者：${c.answer}`
-    ).join("\n\n");
-
-    const userMsg = `職位：${jobTitle || "未指定"}
-重點主題：${customTopics.join("、")}
-已覆蓋主題：${coveredTopics.join("、") || "無"}
-
-${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答：${answerSnapshot}`;
-
     try {
+      const apiBase = (import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/$/, "");
       const resp = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+        `${apiBase}/api/gemini/analyze`,
         {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: SYSTEM_PROMPT }]
-          },
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: userMsg }]
-            }
-          ],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: GEMINI_RESPONSE_SCHEMA,
-            maxOutputTokens: 1000,
-            temperature: 0.2
-          }
+          jobTitle,
+          customTopics,
+          coveredTopics,
+          conversation,
+          latestAnswer: answerSnapshot,
         })
       });
 
       const data = await resp.json();
       if (!resp.ok) {
-        const errMsg = data?.error?.message || `HTTP ${resp.status}`;
+        const errMsg = data?.error?.message || data?.error || `HTTP ${resp.status}`;
         throw new Error(errMsg);
       }
 
-      const text = data?.candidates?.[0]?.content?.parts?.find((part) => typeof part?.text === "string")?.text || "{}";
+      const text = data?.text || "{}";
       const parsed = parseAiJson(text);
       setAiResult(parsed);
 
@@ -1064,24 +995,6 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
           </div>
 
           <div style={{ background: "#111118", border: "1px solid #222", borderRadius: 12, padding: "2rem" }}>
-            <label style={{ color: "#aaa", fontSize: ".8rem", letterSpacing: ".1em", textTransform: "uppercase" }}>Gemini API Key</label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={e => setApiKey(e.target.value)}
-              placeholder="AIza..."
-              style={{
-                width: "100%", marginTop: 8, marginBottom: ".5rem",
-                background: "#0d0d15", border: "1px solid #333", borderRadius: 8,
-                padding: "10px 14px", color: "#e8e0d0", fontSize: "1rem",
-                fontFamily: "inherit", outline: "none"
-              }}
-            />
-            <div style={{ color: "#444", fontSize: ".75rem", marginBottom: "1.5rem" }}>
-              僅儲存於瀏覽器記憶體，不會持久化保存。前往{" "}
-              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" style={{ color: "#6c63ff" }}>aistudio.google.com/app/apikey</a>{" "}取得。
-            </div>
-
             <label style={{ color: "#aaa", fontSize: ".8rem", letterSpacing: ".1em", textTransform: "uppercase" }}>面試職位</label>
             <input
               value={jobTitle}
@@ -1124,13 +1037,13 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
             </div>
 
             <button
-              onClick={() => { if (jobTitle.trim() && apiKey.trim()) setPhase("interview"); }}
+              onClick={() => { if (jobTitle.trim()) setPhase("interview"); }}
               style={{
                 width: "100%", marginTop: "2rem",
-                background: (jobTitle.trim() && apiKey.trim()) ? "linear-gradient(135deg, #6c63ff, #a78bfa)" : "#222",
+                background: jobTitle.trim() ? "linear-gradient(135deg, #6c63ff, #a78bfa)" : "#222",
                 border: "none", borderRadius: 10, padding: "14px",
-                color: (jobTitle.trim() && apiKey.trim()) ? "#fff" : "#444", fontSize: "1rem", fontWeight: 600,
-                cursor: (jobTitle.trim() && apiKey.trim()) ? "pointer" : "not-allowed",
+                color: jobTitle.trim() ? "#fff" : "#444", fontSize: "1rem", fontWeight: 600,
+                cursor: jobTitle.trim() ? "pointer" : "not-allowed",
                 letterSpacing: ".05em", transition: "all .3s"
               }}
             >
