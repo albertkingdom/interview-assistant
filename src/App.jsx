@@ -4,6 +4,7 @@ import { mergeTranscript, appendFinalChunk, stabilizeInterim } from "./utils/tra
 import { buildMarkdownFromRecord } from "./utils/recordUtils";
 import { saveInterviewRecordToStorage } from "./services/recordStorageService";
 import { useAiAnalysis } from "./hooks/useAiAnalysis";
+import { useInterviewFlow } from "./hooks/useInterviewFlow";
 
 const TOPICS_DEFAULT = ["技術能力", "過去經驗", "問題解決", "團隊合作", "自我驅動", "職涯規劃"];
 const RECORDS_STORAGE_KEY = "interview-assistant.records.v1";
@@ -18,15 +19,10 @@ const PAUSE_LINE_BREAK_MS = 1100;
 export default function InterviewAssistant() {
   const [jobTitle, setJobTitle] = useState("");
   const [customTopics, setCustomTopics] = useState(TOPICS_DEFAULT);
-  const [conversation, setConversation] = useState([]);
-  const [currentAnswer, setCurrentAnswer] = useState("");
-  const [currentQuestion, setCurrentQuestion] = useState("");
   const [coveredTopics, setCoveredTopics] = useState([]);
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
-  const [exportStatus, setExportStatus] = useState("");
   const [showDetailControls, setShowDetailControls] = useState(false);
-  const [quickActionStep, setQuickActionStep] = useState(0); // 0: question, 1: answer, 2: save+background analyze+continue
   const [sttEngine, setSttEngine] = useState("openai-realtime");
   const [realtimeStatus, setRealtimeStatus] = useState("idle");
   // listeningTarget: null | "question" | "answer"
@@ -75,6 +71,31 @@ export default function InterviewAssistant() {
   const mixedPreferredLangRef = useRef("zh-TW");
   const answerRef = useRef(null);
   const historyRef = useRef(null);
+  const {
+    conversation,
+    currentAnswer,
+    setCurrentAnswer,
+    currentQuestion,
+    setCurrentQuestion,
+    exportStatus,
+    setExportStatus,
+    quickActionStep,
+    setQuickActionStep,
+    appendConversationIfNeeded,
+    buildConversationSnapshot,
+    clearCurrentTurnInputs,
+    buildInterviewRecord
+  } = useInterviewFlow({
+    jobTitle,
+    customTopics,
+    coveredTopics,
+    historyRef,
+    currentQuestionRef,
+    currentAnswerRef,
+    accumulatedRef,
+    latestInterimRef,
+    setInterimText
+  });
 
   const setTarget = (val) => {
     listeningTargetRef.current = val;
@@ -683,60 +704,6 @@ export default function InterviewAssistant() {
     }
   };
 
-  const appendConversationIfNeeded = (questionInput, answerInput) => {
-    const question = questionInput.trim();
-    const answer = answerInput.trim();
-    if (!question || !answer) return;
-
-    setConversation((prev) => {
-      const last = prev[prev.length - 1];
-      if (last?.question === question && last?.answer === answer) return prev;
-      return [...prev, { question, answer }];
-    });
-    setTimeout(() => historyRef.current?.scrollTo({ top: 99999, behavior: "smooth" }), 100);
-  };
-
-  const buildConversationSnapshot = (questionInput = currentQuestionRef.current, answerInput = currentAnswerRef.current) => {
-    const items = [...conversation];
-    const pendingQuestion = questionInput.trim();
-    const pendingAnswer = answerInput.trim();
-    if (!pendingQuestion || !pendingAnswer) return items;
-
-    const last = items[items.length - 1];
-    if (last?.question === pendingQuestion && last?.answer === pendingAnswer) return items;
-    return [...items, { question: pendingQuestion, answer: pendingAnswer }];
-  };
-
-  const clearCurrentTurnInputs = () => {
-    setCurrentQuestion("");
-    setCurrentAnswer("");
-    currentQuestionRef.current = "";
-    currentAnswerRef.current = "";
-    accumulatedRef.current = "";
-    latestInterimRef.current.question = "";
-    latestInterimRef.current.answer = "";
-    setInterimText("");
-  };
-
-  const buildInterviewRecord = ({
-    questionSnapshot = currentQuestionRef.current,
-    answerSnapshot = currentAnswerRef.current,
-    conversationSnapshot,
-    aiSummarySnapshot = aiResult
-  } = {}) => {
-    const items = conversationSnapshot || buildConversationSnapshot(questionSnapshot, answerSnapshot);
-
-    return {
-      id: String(Date.now()),
-      createdAt: new Date().toISOString(),
-      jobTitle: jobTitle.trim() || "未指定",
-      topics: [...customTopics],
-      coveredTopics: [...coveredTopics],
-      conversation: items,
-      aiSummary: aiSummarySnapshot && !aiSummarySnapshot.error ? aiSummarySnapshot : null
-    };
-  };
-
   const { isLoading, aiResult, callGemini } = useAiAnalysis({
     jobTitle,
     customTopics,
@@ -769,7 +736,7 @@ export default function InterviewAssistant() {
   const finishInterviewAndExport = async () => {
     await stopActiveListening();
 
-    const record = buildInterviewRecord();
+    const record = buildInterviewRecord({ aiSummarySnapshot: aiResult });
     if (record.conversation.length === 0) {
       setExportStatus("尚無對話可匯出");
       return;
@@ -827,7 +794,12 @@ export default function InterviewAssistant() {
     }
 
     const conversationSnapshot = buildConversationSnapshot(questionSnapshot, answerSnapshot);
-    const record = buildInterviewRecord({ questionSnapshot, answerSnapshot, conversationSnapshot });
+    const record = buildInterviewRecord({
+      questionSnapshot,
+      answerSnapshot,
+      conversationSnapshot,
+      aiSummarySnapshot: aiResult
+    });
     if (record.conversation.length === 0) {
       setExportStatus("快速流程：尚無對話可儲存");
       return;
