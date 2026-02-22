@@ -3,6 +3,8 @@ import { OpenAIRealtimeTranscriber } from "./lib/openaiRealtimeTranscriber";
 import { mergeTranscript, appendFinalChunk, stabilizeInterim } from "./utils/transcriptUtils";
 import { parseAiJson } from "./utils/aiJsonUtils";
 import { buildMarkdownFromRecord } from "./utils/recordUtils";
+import { requestGeminiAnalysis } from "./services/geminiAnalysisService";
+import { saveInterviewRecordToStorage } from "./services/recordStorageService";
 
 const TOPICS_DEFAULT = ["技術能力", "過去經驗", "問題解決", "團隊合作", "自我驅動", "職涯規劃"];
 const RECORDS_STORAGE_KEY = "interview-assistant.records.v1";
@@ -739,18 +741,6 @@ export default function InterviewAssistant() {
     };
   };
 
-  const saveInterviewRecord = (record) => {
-    try {
-      const raw = localStorage.getItem(RECORDS_STORAGE_KEY);
-      const records = raw ? JSON.parse(raw) : [];
-      const next = [record, ...records];
-      localStorage.setItem(RECORDS_STORAGE_KEY, JSON.stringify(next));
-    } catch (err) {
-      console.error(err);
-      throw new Error("儲存面試紀錄失敗");
-    }
-  };
-
   const downloadMarkdown = (record, markdown) => {
     const safeJobTitle = record.jobTitle.replace(/[\\/:*?"<>|]/g, "-");
     const timestamp = record.createdAt.replace(/[:]/g, "-").replace(/\.\d{3}Z$/, "");
@@ -776,7 +766,7 @@ export default function InterviewAssistant() {
     }
 
     try {
-      saveInterviewRecord(record);
+      saveInterviewRecordToStorage(RECORDS_STORAGE_KEY, record);
       const markdown = buildMarkdownFromRecord(record);
       downloadMarkdown(record, markdown);
       setExportStatus("已儲存面試紀錄，並下載 Markdown");
@@ -816,28 +806,13 @@ export default function InterviewAssistant() {
     setAiResult(null);
 
     try {
-      const apiBase = (import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/$/, "");
-      const resp = await fetch(
-        `${apiBase}/api/gemini/analyze`,
-        {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          jobTitle,
-          customTopics,
-          coveredTopics,
-          conversation: payloadConversation,
-          latestAnswer: answerText,
-        })
+      const data = await requestGeminiAnalysis({
+        jobTitle,
+        customTopics,
+        coveredTopics,
+        conversation: payloadConversation,
+        latestAnswer: answerText
       });
-
-      const data = await resp.json();
-      if (!resp.ok) {
-        const errMsg = data?.error?.message || data?.error || `HTTP ${resp.status}`;
-        throw new Error(errMsg);
-      }
 
       const text = data?.text || "{}";
       const parsed = parseAiJson(text);
@@ -895,7 +870,7 @@ export default function InterviewAssistant() {
     }
 
     try {
-      saveInterviewRecord(record);
+      saveInterviewRecordToStorage(RECORDS_STORAGE_KEY, record);
       setExportStatus("已儲存面試紀錄，背景 AI 分析中，可直接錄下一題");
     } catch (err) {
       console.error(err);
