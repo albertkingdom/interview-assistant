@@ -36,6 +36,9 @@ export default function InterviewAssistant() {
     autoGainControl: true,
     noiseSuppression: true
   });
+  const [viewportWidth, setViewportWidth] = useState(
+    () => (typeof window !== "undefined" ? window.innerWidth : 1280)
+  );
   const recognitionRef = useRef(null);
   const accumulatedRef = useRef("");
   const currentQuestionRef = useRef("");
@@ -147,6 +150,12 @@ export default function InterviewAssistant() {
   useEffect(() => {
     currentAnswerRef.current = currentAnswer;
   }, [currentAnswer]);
+
+  useEffect(() => {
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   useEffect(() => {
     audioInputConfigRef.current = audioInputConfig;
@@ -1054,6 +1063,14 @@ export default function InterviewAssistant() {
   const scoreLabel = ["", "薄弱", "普通", "普通", "良好", "優秀"];
   const canExport =
     conversation.length > 0 || Boolean(currentQuestion.trim() && currentAnswer.trim());
+  const isNarrowLayout = viewportWidth < 1100;
+  const isMobileLayout = viewportWidth < 768;
+  const setupScreenPadding = isMobileLayout ? "1rem" : "2rem";
+  const setupCardPadding = isMobileLayout ? "1.25rem" : "2rem";
+  const headerPadding = isMobileLayout ? "10px 12px" : "12px 24px";
+  const conversationPadding = isMobileLayout ? "14px 12px" : "20px 24px";
+  const inputAreaPadding = isMobileLayout ? "12px" : "16px 24px";
+  const rightPanelPadding = isMobileLayout ? 12 : 20;
 
   if (phase === "setup") {
     return (
@@ -1061,7 +1078,7 @@ export default function InterviewAssistant() {
         minHeight: "100vh", background: "#0a0a0f",
         display: "flex", alignItems: "center", justifyContent: "center",
         fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif",
-        padding: "2rem"
+        padding: setupScreenPadding
       }}>
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap');
@@ -1071,14 +1088,14 @@ export default function InterviewAssistant() {
           ::-webkit-scrollbar-track { background: #111; }
           ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
         `}</style>
-        <div style={{ width: "100%", maxWidth: 560 }}>
-          <div style={{ textAlign: "center", marginBottom: "3rem" }}>
-            <div style={{ fontSize: "3rem", marginBottom: ".5rem" }}>⬡</div>
-            <h1 style={{ color: "#e8e0d0", fontSize: "1.8rem", fontWeight: 700, margin: 0, letterSpacing: ".05em" }}>面試輔助系統</h1>
-            <p style={{ color: "#666", marginTop: ".5rem", fontSize: ".9rem" }}>AI 即時分析 · 現場面試專用</p>
-          </div>
+          <div style={{ width: "100%", maxWidth: 560 }}>
+            <div style={{ textAlign: "center", marginBottom: "3rem" }}>
+              <div style={{ fontSize: isMobileLayout ? "2.3rem" : "3rem", marginBottom: ".5rem" }}>⬡</div>
+              <h1 style={{ color: "#e8e0d0", fontSize: "1.8rem", fontWeight: 700, margin: 0, letterSpacing: ".05em" }}>面試輔助系統</h1>
+              <p style={{ color: "#666", marginTop: ".5rem", fontSize: ".9rem" }}>AI 即時分析 · 現場面試專用</p>
+            </div>
 
-          <div style={{ background: "#111118", border: "1px solid #222", borderRadius: 12, padding: "2rem" }}>
+          <div style={{ background: "#111118", border: "1px solid #222", borderRadius: 12, padding: setupCardPadding }}>
             <label style={{ color: "#aaa", fontSize: ".8rem", letterSpacing: ".1em", textTransform: "uppercase" }}>面試職位</label>
             <input
               value={jobTitle}
@@ -1143,8 +1160,11 @@ export default function InterviewAssistant() {
     <div style={{
       minHeight: "100vh", background: "#0a0a0f", color: "#e8e0d0",
       fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif",
-      display: "grid", gridTemplateColumns: "1fr 340px", gridTemplateRows: "auto 1fr",
-      height: "100vh", overflow: "hidden"
+      display: "grid",
+      gridTemplateColumns: isNarrowLayout ? "1fr" : "minmax(0, 1fr) 340px",
+      gridTemplateRows: isNarrowLayout ? "auto minmax(0, 1fr) auto" : "auto minmax(0, 1fr)",
+      height: isNarrowLayout ? "auto" : "100vh",
+      overflow: isNarrowLayout ? "visible" : "hidden"
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap');
@@ -1162,14 +1182,24 @@ export default function InterviewAssistant() {
       `}</style>
 
       {/* Header */}
-      <div style={{ gridColumn: "1/-1", background: "#0d0d14", borderBottom: "1px solid #1a1a28", padding: "12px 24px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div style={{
+        gridColumn: "1/-1",
+        background: "#0d0d14",
+        borderBottom: "1px solid #1a1a28",
+        padding: headerPadding,
+        display: "flex",
+        flexDirection: isMobileLayout ? "column" : "row",
+        alignItems: isMobileLayout ? "flex-start" : "center",
+        justifyContent: isMobileLayout ? "flex-start" : "space-between",
+        gap: isMobileLayout ? 10 : 0
+      }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ fontSize: "1.2rem" }}>⬡</span>
           <span style={{ color: "#888", fontSize: ".85rem" }}>面試輔助</span>
           <span style={{ color: "#444" }}>·</span>
-          <span style={{ color: "#a78bfa", fontWeight: 700 }}>{jobTitle}</span>
+          <span style={{ color: "#a78bfa", fontWeight: 700, wordBreak: "break-word" }}>{jobTitle}</span>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", width: isMobileLayout ? "100%" : "auto" }}>
           {customTopics.map(t => (
             <span key={t} style={{
               fontSize: ".72rem", padding: "2px 8px", borderRadius: 10,
@@ -1184,9 +1214,9 @@ export default function InterviewAssistant() {
       </div>
 
       {/* Main content - conversation + input */}
-      <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div style={{ display: "flex", flexDirection: "column", overflow: isNarrowLayout ? "visible" : "hidden", minHeight: 0 }}>
         {/* History */}
-        <div ref={historyRef} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+        <div ref={historyRef} style={{ flex: 1, overflowY: isNarrowLayout ? "visible" : "auto", padding: conversationPadding }}>
           {conversation.length === 0 && (
             <div style={{ color: "#333", textAlign: "center", marginTop: "3rem", fontSize: ".9rem" }}>
               開始輸入第一個問題與面試者回答 ↓
@@ -1207,7 +1237,7 @@ export default function InterviewAssistant() {
         </div>
 
         {/* Input area */}
-        <div style={{ padding: "16px 24px", background: "#0d0d14", borderTop: "1px solid #1a1a28" }}>
+        <div style={{ padding: inputAreaPadding, background: "#0d0d14", borderTop: "1px solid #1a1a28" }}>
           <div style={{ marginBottom: 12 }}>
             <button
               type="button"
@@ -1393,7 +1423,7 @@ export default function InterviewAssistant() {
             </div>
           </div>
           <div style={{ marginBottom: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: isMobileLayout ? "wrap" : "nowrap", gap: 6 }}>
               <label style={{ color: "#a78bfa", fontSize: ".75rem", letterSpacing: ".08em" }}>🎙 你的問題（面試官）</label>
               <button onClick={() => toggleListening("question")} style={{
                 background: listeningTarget === "question" ? "#2a1a40" : "#1a1a2a",
@@ -1429,7 +1459,14 @@ export default function InterviewAssistant() {
                 resize: "vertical", lineHeight: 1.6
               }}
             />
-            <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <div style={{
+              marginTop: 6,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: isMobileLayout ? "flex-start" : "center",
+              gap: 8,
+              flexDirection: isMobileLayout ? "column" : "row"
+            }}>
               <span style={{ color: "#4e4e68", fontSize: ".72rem" }}>快捷鍵：Cmd/Ctrl + Enter</span>
               <button
                 type="button"
@@ -1457,7 +1494,7 @@ export default function InterviewAssistant() {
             )}
           </div>
           <div>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: isMobileLayout ? "wrap" : "nowrap", gap: 6 }}>
               <label style={{ color: "#4ade80", fontSize: ".75rem", letterSpacing: ".08em" }}>🎙 面試者回答摘要</label>
               <button onClick={() => toggleListening("answer")} style={{
                 background: listeningTarget === "answer" ? "#1a3a1a" : "#1a1a2a",
@@ -1515,7 +1552,14 @@ export default function InterviewAssistant() {
       </div>
 
       {/* Right sidebar - AI results */}
-      <div style={{ background: "#0d0d14", borderLeft: "1px solid #1a1a28", overflowY: "auto", padding: 20 }}>
+      <div style={{
+        background: "#0d0d14",
+        borderLeft: isNarrowLayout ? "none" : "1px solid #1a1a28",
+        borderTop: isNarrowLayout ? "1px solid #1a1a28" : "none",
+        overflowY: isNarrowLayout ? "visible" : "auto",
+        padding: rightPanelPadding,
+        minHeight: 0
+      }}>
         <div style={{ color: "#555", fontSize: ".75rem", letterSpacing: ".1em", marginBottom: 16 }}>AI 輔助面板</div>
         <button
           onClick={finishInterviewAndExport}
