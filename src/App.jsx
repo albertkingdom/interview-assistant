@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { OpenAIRealtimeTranscriber } from "./lib/openaiRealtimeTranscriber";
 
 const SYSTEM_PROMPT = `你是一位資深面試輔助 AI，協助面試官在面試過程中做出更好的判斷與提問。
 
@@ -24,6 +25,13 @@ const SYSTEM_PROMPT = `你是一位資深面試輔助 AI，協助面試官在面
 
 const TOPICS_DEFAULT = ["技術能力", "過去經驗", "問題解決", "團隊合作", "自我驅動", "職涯規劃"];
 const RECORDS_STORAGE_KEY = "interview-assistant.records.v1";
+const WATCHDOG_INTERVAL_MS = 1500;
+const STALL_TIMEOUT_MS = 12000;
+const MAX_SESSION_DURATION_MS = 90000;
+const LOW_VOLUME_RMS_THRESHOLD = 0.015;
+const LOW_VOLUME_HOLD_MS = 1800;
+const MIC_MONITOR_INTERVAL_MS = 350;
+const PAUSE_LINE_BREAK_MS = 1100;
 const GEMINI_RESPONSE_SCHEMA = {
   type: "OBJECT",
   properties: {
@@ -61,13 +69,49 @@ export default function InterviewAssistant() {
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
   const [exportStatus, setExportStatus] = useState("");
+  const [sttEngine, setSttEngine] = useState("openai-realtime");
+  const [realtimeStatus, setRealtimeStatus] = useState("idle");
   // listeningTarget: null | "question" | "answer"
   const [listeningTarget, setListeningTarget] = useState(null);
   const [interimText, setInterimText] = useState(""); // live interim display
+  const [micWarning, setMicWarning] = useState("");
+  const [speechLangMode, setSpeechLangMode] = useState("zh-TW");
+  const [audioInputConfig, setAudioInputConfig] = useState({
+    autoGainControl: true,
+    noiseSuppression: true
+  });
   const recognitionRef = useRef(null);
   const accumulatedRef = useRef("");
+  const currentQuestionRef = useRef("");
+  const currentAnswerRef = useRef("");
   const listeningTargetRef = useRef(null); // mirror for use inside callbacks
+  const latestInterimRef = useRef({ question: "", answer: "" });
+  const flushPendingInterimRef = useRef(() => {});
+  const stopMicMonitorRef = useRef(() => {});
+  const appendFinalChunkRef = useRef((baseText = "") => baseText);
+  const safeStartRecognitionRef = useRef(() => false);
+  const safeStopRecognitionRef = useRef(() => {});
+  const realtimeTranscriberRef = useRef(null);
+  const sttEngineRef = useRef("openai-realtime");
   const shouldRestartRef = useRef(false);  // auto-restart flag
+  const restartTimerRef = useRef(null);
+  const restartAttemptRef = useRef(0);
+  const watchdogTimerRef = useRef(null);
+  const lastRecognitionEventAtRef = useRef(0);
+  const sessionStartedAtRef = useRef(0);
+  const micMonitorTimerRef = useRef(null);
+  const monitorStreamRef = useRef(null);
+  const monitorAudioContextRef = useRef(null);
+  const monitorAnalyserRef = useRef(null);
+  const monitorSourceRef = useRef(null);
+  const lowVolumeSinceRef = useRef(0);
+  const lastFinalAtRef = useRef(0);
+  const audioInputConfigRef = useRef({
+    autoGainControl: true,
+    noiseSuppression: true
+  });
+  const speechLangModeRef = useRef("zh-TW");
+  const mixedPreferredLangRef = useRef("zh-TW");
   const answerRef = useRef(null);
   const historyRef = useRef(null);
 
@@ -76,14 +120,395 @@ export default function InterviewAssistant() {
     setListeningTarget(val);
   };
 
+  const mergeTranscript = (baseText = "", appendedText = "") => {
+    if (!appendedText) return baseText;
+    if (!baseText) return appendedText;
+    if (baseText.endsWith(appendedText)) return baseText;
+    if (appendedText.startsWith(baseText)) return appendedText;
+
+    const maxOverlap = Math.min(baseText.length, appendedText.length);
+    for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+      if (baseText.slice(-overlap) === appendedText.slice(0, overlap)) {
+        return baseText + appendedText.slice(overlap);
+      }
+    }
+    return baseText + appendedText;
+  };
+
+  const appendFinalChunk = (baseText = "", finalChunk = "", addLineBreak = false) => {
+    if (!finalChunk || !finalChunk.trim()) return baseText;
+    if (!baseText) return finalChunk.trimStart();
+    if (!addLineBreak) return mergeTranscript(baseText, finalChunk);
+    const baseWithBreak = baseText.endsWith("\n") ? baseText : `${baseText}\n`;
+    return mergeTranscript(baseWithBreak, finalChunk.trimStart());
+  };
+  appendFinalChunkRef.current = appendFinalChunk;
+
+  const stabilizeInterim = (previousInterim = "", nextInterim = "") => {
+    if (!previousInterim || !nextInterim) return nextInterim;
+    if (previousInterim.length > nextInterim.length && previousInterim.startsWith(nextInterim)) {
+      return previousInterim;
+    }
+    return nextInterim;
+  };
+
+  const resolveStableFieldText = (target, candidateText) => {
+    const fieldText = target === "question" ? currentQuestionRef.current : currentAnswerRef.current;
+    if (!fieldText) return candidateText;
+    if (!candidateText) return fieldText;
+    if (candidateText.includes(fieldText)) return candidateText;
+    if (fieldText.includes(candidateText)) return fieldText;
+    return candidateText.length >= fieldText.length ? candidateText : fieldText;
+  };
+
+  const setTargetText = (target, text) => {
+    if (target === "question") {
+      currentQuestionRef.current = text;
+      setCurrentQuestion(text);
+    } else if (target === "answer") {
+      currentAnswerRef.current = text;
+      setCurrentAnswer(text);
+    }
+  };
+
+  const flushPendingInterim = (target = listeningTargetRef.current) => {
+    if (!target) return;
+    const pendingInterim = latestInterimRef.current[target] || "";
+    const mergedText = mergeTranscript(accumulatedRef.current || "", pendingInterim);
+    const resolvedText = resolveStableFieldText(target, mergedText);
+    accumulatedRef.current = resolvedText;
+    setTargetText(target, resolvedText);
+    latestInterimRef.current[target] = "";
+    setInterimText("");
+  };
+  flushPendingInterimRef.current = flushPendingInterim;
+
+  useEffect(() => {
+    currentQuestionRef.current = currentQuestion;
+  }, [currentQuestion]);
+
+  useEffect(() => {
+    currentAnswerRef.current = currentAnswer;
+  }, [currentAnswer]);
+
+  useEffect(() => {
+    audioInputConfigRef.current = audioInputConfig;
+  }, [audioInputConfig]);
+
+  useEffect(() => {
+    speechLangModeRef.current = speechLangMode;
+    if (speechLangMode === "zh-TW" || speechLangMode === "en-US") {
+      mixedPreferredLangRef.current = speechLangMode;
+    } else {
+      mixedPreferredLangRef.current = "zh-TW";
+    }
+    if (listeningTargetRef.current && recognitionRef.current) {
+      clearRestartTimer();
+      safeStopRecognitionRef.current(recognitionRef.current);
+    }
+  }, [speechLangMode]);
+
+  useEffect(() => {
+    const track = monitorStreamRef.current?.getAudioTracks?.()[0];
+    if (!track?.applyConstraints) return;
+    track.applyConstraints({
+      autoGainControl: audioInputConfig.autoGainControl,
+      noiseSuppression: audioInputConfig.noiseSuppression
+    }).catch((err) => {
+      console.debug("Audio constraint update ignored:", err);
+    });
+  }, [audioInputConfig]);
+
+  useEffect(() => {
+    sttEngineRef.current = sttEngine;
+    setMicWarning("");
+    stopMicMonitor();
+    lastFinalAtRef.current = 0;
+    setTarget(null);
+    setInterimText("");
+    if (sttEngine === "openai-realtime") {
+      shouldRestartRef.current = false;
+      clearRestartTimer();
+      safeStopRecognitionRef.current(recognitionRef.current);
+      setRealtimeStatus("idle");
+    } else {
+      const transcriber = realtimeTranscriberRef.current;
+      if (transcriber) {
+        void transcriber.stop();
+      }
+      setRealtimeStatus("idle");
+    }
+  }, [sttEngine]);
+
+  useEffect(() => () => {
+    const transcriber = realtimeTranscriberRef.current;
+    if (transcriber) {
+      void transcriber.stop();
+      realtimeTranscriberRef.current = null;
+    }
+  }, []);
+
+  const clearRestartTimer = () => {
+    if (restartTimerRef.current) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+  };
+
+  const getRecognitionLang = () => {
+    if (speechLangModeRef.current === "mixed") return mixedPreferredLangRef.current;
+    return speechLangModeRef.current;
+  };
+
+  const updateMixedPreferredLang = (text) => {
+    if (speechLangModeRef.current !== "mixed") return;
+    const sample = (text || "").slice(-180);
+    if (!sample) return;
+    const latinChars = (sample.match(/[A-Za-z]/g) || []).length;
+    const cjkChars = (sample.match(/[\u4E00-\u9FFF]/g) || []).length;
+    const englishWords = (sample.match(/\b[A-Za-z][A-Za-z0-9+#.-]*\b/g) || []).length;
+    const englishScore = latinChars + englishWords * 6;
+    const chineseScore = cjkChars * 1.4;
+    if (englishScore > chineseScore + 10) {
+      mixedPreferredLangRef.current = "en-US";
+    } else if (chineseScore > englishScore + 10) {
+      mixedPreferredLangRef.current = "zh-TW";
+    }
+  };
+
+  const pickTranscriptFromResult = (result) => {
+    if (!result) return "";
+    const mode = speechLangModeRef.current;
+    let bestText = result[0]?.transcript || "";
+    let bestScore = -Infinity;
+    for (let idx = 0; idx < result.length; idx += 1) {
+      const alt = result[idx];
+      const text = alt?.transcript || "";
+      const confidence = typeof alt?.confidence === "number" ? alt.confidence : 0;
+      const latinChars = (text.match(/[A-Za-z]/g) || []).length;
+      const cjkChars = (text.match(/[\u4E00-\u9FFF]/g) || []).length;
+      const technicalWords = (text.match(/\b[A-Za-z][A-Za-z0-9+#.-]*\b/g) || []).length;
+      const mixedBonus = mode === "mixed" ? (technicalWords * 0.35 + (latinChars > 0 && cjkChars > 0 ? 0.2 : 0)) : 0;
+      const score = confidence + mixedBonus + latinChars * 0.01;
+      if (score > bestScore) {
+        bestScore = score;
+        bestText = text;
+      }
+    }
+    return bestText;
+  };
+
+  const stopMicMonitor = () => {
+    if (micMonitorTimerRef.current) {
+      clearInterval(micMonitorTimerRef.current);
+      micMonitorTimerRef.current = null;
+    }
+    lowVolumeSinceRef.current = 0;
+    setMicWarning("");
+    if (monitorSourceRef.current) {
+      try {
+        monitorSourceRef.current.disconnect();
+      } catch (err) {
+        console.debug("Mic source disconnect ignored:", err);
+      }
+      monitorSourceRef.current = null;
+    }
+    monitorAnalyserRef.current = null;
+    if (monitorAudioContextRef.current) {
+      monitorAudioContextRef.current.close().catch(() => {});
+      monitorAudioContextRef.current = null;
+    }
+    if (monitorStreamRef.current) {
+      monitorStreamRef.current.getTracks().forEach((track) => track.stop());
+      monitorStreamRef.current = null;
+    }
+  };
+  stopMicMonitorRef.current = stopMicMonitor;
+
+  const startMicMonitor = async () => {
+    if (micMonitorTimerRef.current || monitorStreamRef.current) return;
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    try {
+      const config = audioInputConfigRef.current;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          noiseSuppression: config.noiseSuppression,
+          echoCancellation: true,
+          autoGainControl: config.autoGainControl
+        }
+      });
+      monitorStreamRef.current = stream;
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+      const audioContext = new AudioContextClass();
+      monitorAudioContextRef.current = audioContext;
+      const source = audioContext.createMediaStreamSource(stream);
+      monitorSourceRef.current = source;
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.2;
+      source.connect(analyser);
+      monitorAnalyserRef.current = analyser;
+      const data = new Uint8Array(analyser.fftSize);
+      micMonitorTimerRef.current = setInterval(() => {
+        if (!shouldRestartRef.current || !listeningTargetRef.current || !monitorAnalyserRef.current) {
+          lowVolumeSinceRef.current = 0;
+          setMicWarning("");
+          return;
+        }
+        monitorAnalyserRef.current.getByteTimeDomainData(data);
+        let sumSquares = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const normalized = (data[i] - 128) / 128;
+          sumSquares += normalized * normalized;
+        }
+        const rms = Math.sqrt(sumSquares / data.length);
+        if (rms < LOW_VOLUME_RMS_THRESHOLD) {
+          if (!lowVolumeSinceRef.current) lowVolumeSinceRef.current = Date.now();
+          if (Date.now() - lowVolumeSinceRef.current > LOW_VOLUME_HOLD_MS) {
+            setMicWarning("音量偏小，請靠近麥克風或提高輸入音量");
+          }
+        } else {
+          lowVolumeSinceRef.current = 0;
+          setMicWarning("");
+        }
+      }, MIC_MONITOR_INTERVAL_MS);
+    } catch (err) {
+      console.debug("Mic monitor unavailable:", err);
+    }
+  };
+
+  const toggleAudioInputConfig = (key) => {
+    setAudioInputConfig((prev) => ({
+      ...prev,
+      [key]: !prev[key]
+    }));
+  };
+
+  const handleRealtimeInterim = (rawText) => {
+    const target = listeningTargetRef.current;
+    if (!target) return;
+    const text = rawText || "";
+    const previousInterim = latestInterimRef.current[target] || "";
+    const stabilizedInterim = stabilizeInterim(previousInterim, text);
+    latestInterimRef.current[target] = stabilizedInterim;
+    setInterimText(stabilizedInterim);
+    const merged = mergeTranscript(accumulatedRef.current, stabilizedInterim);
+    const resolvedText = resolveStableFieldText(target, merged);
+    setTargetText(target, resolvedText);
+  };
+
+  const handleRealtimeFinal = (rawText) => {
+    const target = listeningTargetRef.current;
+    if (!target) return;
+    const text = rawText || "";
+    if (!text.trim()) return;
+    const now = Date.now();
+    const shouldLineBreak = Boolean(
+      accumulatedRef.current &&
+      lastFinalAtRef.current &&
+      now - lastFinalAtRef.current > PAUSE_LINE_BREAK_MS
+    );
+    accumulatedRef.current = appendFinalChunkRef.current(accumulatedRef.current, text, shouldLineBreak);
+    lastFinalAtRef.current = now;
+    latestInterimRef.current[target] = "";
+    setInterimText("");
+    const resolvedText = resolveStableFieldText(target, accumulatedRef.current);
+    setTargetText(target, resolvedText);
+    updateMixedPreferredLang(resolvedText);
+  };
+
+  const ensureRealtimeTranscriber = () => {
+    if (realtimeTranscriberRef.current) return realtimeTranscriberRef.current;
+    const transcriber = new OpenAIRealtimeTranscriber({
+      onStatus: (payload) => {
+        const nextState = payload?.state || "unknown";
+        setRealtimeStatus(nextState);
+        if (nextState === "connected") setMicWarning("");
+      },
+      onInterim: (text) => {
+        handleRealtimeInterim(text);
+      },
+      onFinal: (text) => {
+        handleRealtimeFinal(text);
+      },
+      onError: (err) => {
+        const msg = err instanceof Error ? err.message : String(err || "Unknown error");
+        setRealtimeStatus("error");
+        setMicWarning(`Realtime 轉寫異常：${msg}`);
+      },
+    });
+    realtimeTranscriberRef.current = transcriber;
+    return transcriber;
+  };
+
+  const startRealtimeListening = async (target) => {
+    flushPendingInterim();
+    shouldRestartRef.current = false;
+    clearRestartTimer();
+    safeStopRecognitionRef.current(recognitionRef.current);
+    stopMicMonitor();
+
+    accumulatedRef.current = target === "question" ? currentQuestionRef.current : currentAnswerRef.current;
+    latestInterimRef.current[target] = "";
+    lastFinalAtRef.current = Date.now();
+    setInterimText("");
+    setTarget(target);
+    startMicMonitor();
+
+    const transcriber = ensureRealtimeTranscriber();
+    try {
+      const language =
+        speechLangMode === "en-US" ? "en" : speechLangMode === "zh-TW" ? "zh" : "auto";
+      await transcriber.start({
+        model: "gpt-4o-mini-transcribe",
+        language,
+        includeLogprobs: false,
+        noiseReductionType: "near_field",
+        silenceDurationMs: 900,
+        audioConfig: {
+          autoGainControl: audioInputConfig.autoGainControl,
+          noiseSuppression: audioInputConfig.noiseSuppression,
+          echoCancellation: true,
+        },
+      });
+    } catch (err) {
+      stopMicMonitor();
+      setTarget(null);
+      setInterimText("");
+      latestInterimRef.current[target] = "";
+      const msg = err instanceof Error ? err.message : String(err || "Unknown error");
+      setMicWarning(`Realtime 連線失敗：${msg}`);
+    }
+  };
+
+  const stopRealtimeListening = async (target = listeningTargetRef.current) => {
+    flushPendingInterim(target);
+    stopMicMonitor();
+    lastFinalAtRef.current = 0;
+    const transcriber = realtimeTranscriberRef.current;
+    if (transcriber) {
+      await transcriber.stop();
+    }
+    setTarget(null);
+    setInterimText("");
+  };
+
   const safeStartRecognition = (recognition) => {
     if (!recognition) return;
     try {
+      recognition.lang = getRecognitionLang();
+      recognition.maxAlternatives = speechLangModeRef.current === "mixed" ? 3 : 1;
       recognition.start();
+      restartAttemptRef.current = 0;
+      return true;
     } catch (err) {
       console.debug("SpeechRecognition start ignored:", err);
+      return false;
     }
   };
+  safeStartRecognitionRef.current = safeStartRecognition;
 
   const safeStopRecognition = (recognition) => {
     if (!recognition) return;
@@ -93,87 +518,216 @@ export default function InterviewAssistant() {
       console.debug("SpeechRecognition stop ignored:", err);
     }
   };
+  safeStopRecognitionRef.current = safeStopRecognition;
 
   // Build a single shared SpeechRecognition instance
   useEffect(() => {
     if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) return;
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SR();
-    recognition.lang = "zh-TW";
+    recognition.lang = getRecognitionLang();
     recognition.continuous = true;
     recognition.interimResults = true;
+    recognition.maxAlternatives = speechLangModeRef.current === "mixed" ? 3 : 1;
+
+    const scheduleRestart = (baseDelayMs = 350) => {
+      if (!shouldRestartRef.current) return;
+      clearRestartTimer();
+      const attempt = restartAttemptRef.current;
+      const delay = Math.min(baseDelayMs + attempt * 350, 3000);
+      restartTimerRef.current = setTimeout(() => {
+        restartTimerRef.current = null;
+        if (!shouldRestartRef.current) return;
+        const started = safeStartRecognitionRef.current(recognition);
+        if (!started) {
+          restartAttemptRef.current += 1;
+          scheduleRestart(700);
+        }
+      }, delay);
+    };
+
+    const clearWatchdog = () => {
+      if (watchdogTimerRef.current) {
+        clearInterval(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
+    };
+
+    const touchRecognitionEvent = () => {
+      lastRecognitionEventAtRef.current = Date.now();
+    };
+
+    recognition.onstart = () => {
+      if (sttEngineRef.current !== "browser") return;
+      touchRecognitionEvent();
+      sessionStartedAtRef.current = Date.now();
+      restartAttemptRef.current = 0;
+      lastFinalAtRef.current = Date.now();
+    };
 
     recognition.onresult = (e) => {
+      if (sttEngineRef.current !== "browser") return;
+      touchRecognitionEvent();
       let newFinal = "";
       let interim = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) newFinal += e.results[i][0].transcript;
-        else interim += e.results[i][0].transcript;
-      }
-      if (newFinal) {
-        accumulatedRef.current += newFinal;
-        setInterimText("");
-      } else {
-        setInterimText(interim);
+        const transcript = pickTranscriptFromResult(e.results[i]);
+        if (e.results[i].isFinal) newFinal += transcript;
+        else interim += transcript;
       }
       const target = listeningTargetRef.current;
-      if (target === "question") setCurrentQuestion(accumulatedRef.current + (newFinal ? "" : interim));
-      else if (target === "answer") setCurrentAnswer(accumulatedRef.current + (newFinal ? "" : interim));
+      const previousInterim = target ? latestInterimRef.current[target] : "";
+      const stabilizedInterim = newFinal ? "" : stabilizeInterim(previousInterim, interim);
+      if (newFinal) {
+        const now = Date.now();
+        const shouldLineBreak = Boolean(
+          accumulatedRef.current &&
+          lastFinalAtRef.current &&
+          now - lastFinalAtRef.current > PAUSE_LINE_BREAK_MS
+        );
+        accumulatedRef.current = appendFinalChunkRef.current(accumulatedRef.current, newFinal, shouldLineBreak);
+        lastFinalAtRef.current = now;
+        setInterimText("");
+      } else {
+        setInterimText(stabilizedInterim);
+      }
+      if (target) {
+        if (newFinal) latestInterimRef.current[target] = "";
+        else latestInterimRef.current[target] = stabilizedInterim;
+      }
+      if (target === "question" || target === "answer") {
+        const merged = mergeTranscript(accumulatedRef.current, stabilizedInterim);
+        const resolvedText = resolveStableFieldText(target, merged);
+        setTargetText(target, resolvedText);
+        updateMixedPreferredLang(resolvedText);
+      }
+      restartAttemptRef.current = 0;
     };
 
     recognition.onerror = (e) => {
-      // "no-speech" is not a fatal error — just restart
-      if (e.error === "no-speech" && shouldRestartRef.current) {
-        safeStartRecognition(recognition);
-      } else if (e.error !== "aborted") {
+      if (sttEngineRef.current !== "browser") return;
+      touchRecognitionEvent();
+      // Browser can end long sessions; restart with backoff to avoid dead stops.
+      if (e.error === "aborted") return;
+      if (e.error === "not-allowed" || e.error === "service-not-allowed" || e.error === "audio-capture") {
+        flushPendingInterimRef.current();
         shouldRestartRef.current = false;
+        stopMicMonitorRef.current();
+        lastFinalAtRef.current = 0;
         setTarget(null);
         setInterimText("");
+        clearRestartTimer();
+        return;
+      }
+      if (shouldRestartRef.current) {
+        flushPendingInterimRef.current();
+        scheduleRestart(e.error === "no-speech" ? 300 : 700);
+      } else {
+        stopMicMonitorRef.current();
+        lastFinalAtRef.current = 0;
+        setTarget(null);
       }
     };
 
     recognition.onend = () => {
+      if (sttEngineRef.current !== "browser") return;
+      touchRecognitionEvent();
       setInterimText("");
       // Auto-restart if user hasn't manually stopped
       if (shouldRestartRef.current) {
-        safeStartRecognition(recognition);
+        flushPendingInterimRef.current();
+        scheduleRestart(450);
       } else {
+        stopMicMonitorRef.current();
+        lastFinalAtRef.current = 0;
         setTarget(null);
+        clearRestartTimer();
       }
     };
 
     recognitionRef.current = recognition;
+    clearWatchdog();
+    watchdogTimerRef.current = setInterval(() => {
+      if (!shouldRestartRef.current || !listeningTargetRef.current) return;
+      const now = Date.now();
+      const last = lastRecognitionEventAtRef.current || 0;
+      const startedAt = sessionStartedAtRef.current || now;
+      const stalled = last && now - last > STALL_TIMEOUT_MS;
+      const sessionTooLong = now - startedAt > MAX_SESSION_DURATION_MS;
+      // Chrome SpeechRecognition can silently stall; rotate session on stall or long-running session.
+      if (stalled || sessionTooLong) {
+        flushPendingInterimRef.current();
+        touchRecognitionEvent();
+        sessionStartedAtRef.current = now;
+        clearRestartTimer();
+        safeStopRecognitionRef.current(recognition);
+        scheduleRestart(300);
+      }
+    }, WATCHDOG_INTERVAL_MS);
 
     return () => {
       shouldRestartRef.current = false;
+      clearRestartTimer();
+      clearWatchdog();
+      stopMicMonitorRef.current();
+      sessionStartedAtRef.current = 0;
+      lastFinalAtRef.current = 0;
+      recognition.onstart = null;
       recognition.onresult = null;
       recognition.onerror = null;
       recognition.onend = null;
-      safeStopRecognition(recognition);
+      safeStopRecognitionRef.current(recognition);
       recognitionRef.current = null;
     };
   }, []);
 
-  const toggleListening = (target) => {
+  const toggleListening = async (target) => {
+    if (sttEngineRef.current === "openai-realtime") {
+      if (listeningTargetRef.current === target) {
+        await stopRealtimeListening(target);
+      } else {
+        await startRealtimeListening(target);
+      }
+      return;
+    }
+
     if (!recognitionRef.current) return;
     if (listeningTargetRef.current === target) {
       // Manual stop
+      flushPendingInterim(target);
       shouldRestartRef.current = false;
-      safeStopRecognition(recognitionRef.current);
+      clearRestartTimer();
+      stopMicMonitor();
+      lastFinalAtRef.current = 0;
+      safeStopRecognitionRef.current(recognitionRef.current);
       setTarget(null);
       setInterimText("");
     } else {
       // Stop existing if any
+      flushPendingInterim();
       shouldRestartRef.current = false;
-      safeStopRecognition(recognitionRef.current);
+      clearRestartTimer();
+      stopMicMonitor();
+      safeStopRecognitionRef.current(recognitionRef.current);
       // Seed accumulated from current field
       accumulatedRef.current = target === "question" ? currentQuestion : currentAnswer;
       setInterimText("");
       setTimeout(() => {
         shouldRestartRef.current = true;
+        restartAttemptRef.current = 0;
+        lastFinalAtRef.current = Date.now();
         setTarget(target);
-        safeStartRecognition(recognitionRef.current);
+        startMicMonitor();
+        safeStartRecognitionRef.current(recognitionRef.current);
       }, 200);
+    }
+  };
+
+  const handoffToCandidateAnswer = () => {
+    answerRef.current?.focus();
+    if (sttEngineRef.current !== "openai-realtime" && !recognitionRef.current) return;
+    if (listeningTargetRef.current !== "answer") {
+      void toggleListening("answer");
     }
   };
 
@@ -348,12 +902,20 @@ export default function InterviewAssistant() {
     URL.revokeObjectURL(url);
   };
 
-  const finishInterviewAndExport = () => {
+  const finishInterviewAndExport = async () => {
     if (listeningTargetRef.current) {
-      shouldRestartRef.current = false;
-      safeStopRecognition(recognitionRef.current);
-      setTarget(null);
-      setInterimText("");
+      if (sttEngineRef.current === "openai-realtime") {
+        await stopRealtimeListening();
+      } else {
+        flushPendingInterim();
+        shouldRestartRef.current = false;
+        clearRestartTimer();
+        stopMicMonitor();
+        lastFinalAtRef.current = 0;
+        safeStopRecognitionRef.current(recognitionRef.current);
+        setTarget(null);
+        setInterimText("");
+      }
     }
 
     const record = buildInterviewRecord();
@@ -384,12 +946,22 @@ export default function InterviewAssistant() {
 
     appendConversationIfNeeded(questionSnapshot, answerSnapshot);
     if (listeningTargetRef.current) {
-      shouldRestartRef.current = false;
-      safeStopRecognition(recognitionRef.current);
-      setTarget(null);
+      if (sttEngineRef.current === "openai-realtime") {
+        await stopRealtimeListening();
+      } else {
+        flushPendingInterim();
+        shouldRestartRef.current = false;
+        clearRestartTimer();
+        stopMicMonitor();
+        lastFinalAtRef.current = 0;
+        safeStopRecognitionRef.current(recognitionRef.current);
+        setTarget(null);
+      }
     }
     setCurrentQuestion("");
     setCurrentAnswer("");
+    currentQuestionRef.current = "";
+    currentAnswerRef.current = "";
     accumulatedRef.current = "";
     setInterimText("");
 
@@ -638,6 +1210,137 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
 
         {/* Input area */}
         <div style={{ padding: "16px 24px", background: "#0d0d14", borderTop: "1px solid #1a1a28" }}>
+          <div style={{ marginBottom: 12, padding: "8px 10px", background: "#10101a", border: "1px solid #1b1b2a", borderRadius: 8 }}>
+            <div style={{ color: "#7a7a90", fontSize: ".7rem", letterSpacing: ".08em", marginBottom: 8 }}>
+              錄音前處理參數
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <button
+                type="button"
+                onClick={() => setSttEngine("browser")}
+                style={{
+                  background: sttEngine === "browser" ? "#2a1a40" : "#1a1a2a",
+                  border: `1px solid ${sttEngine === "browser" ? "#a78bfa" : "#333"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  color: sttEngine === "browser" ? "#cdb6ff" : "#666",
+                  fontSize: ".75rem",
+                  cursor: "pointer",
+                  fontFamily: "inherit"
+                }}
+              >
+                STT：瀏覽器
+              </button>
+              <button
+                type="button"
+                onClick={() => setSttEngine("openai-realtime")}
+                style={{
+                  background: sttEngine === "openai-realtime" ? "#173022" : "#1a1a2a",
+                  border: `1px solid ${sttEngine === "openai-realtime" ? "#2d7a52" : "#333"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  color: sttEngine === "openai-realtime" ? "#6ee7a8" : "#666",
+                  fontSize: ".75rem",
+                  cursor: "pointer",
+                  fontFamily: "inherit"
+                }}
+              >
+                STT：OpenAI Realtime
+              </button>
+              {sttEngine === "openai-realtime" && (
+                <span style={{ color: "#4e4e68", fontSize: ".72rem", alignSelf: "center" }}>
+                  狀態：{realtimeStatus}
+                </span>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <button
+                type="button"
+                onClick={() => setSpeechLangMode("zh-TW")}
+                style={{
+                  background: speechLangMode === "zh-TW" ? "#1f2f4f" : "#1a1a2a",
+                  border: `1px solid ${speechLangMode === "zh-TW" ? "#2f5fa0" : "#333"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  color: speechLangMode === "zh-TW" ? "#9ec1f7" : "#666",
+                  fontSize: ".75rem",
+                  cursor: "pointer",
+                  fontFamily: "inherit"
+                }}
+              >
+                辨識語言：中文
+              </button>
+              <button
+                type="button"
+                onClick={() => setSpeechLangMode("en-US")}
+                style={{
+                  background: speechLangMode === "en-US" ? "#1f2f4f" : "#1a1a2a",
+                  border: `1px solid ${speechLangMode === "en-US" ? "#2f5fa0" : "#333"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  color: speechLangMode === "en-US" ? "#9ec1f7" : "#666",
+                  fontSize: ".75rem",
+                  cursor: "pointer",
+                  fontFamily: "inherit"
+                }}
+              >
+                辨識語言：英文
+              </button>
+              <button
+                type="button"
+                onClick={() => setSpeechLangMode("mixed")}
+                style={{
+                  background: speechLangMode === "mixed" ? "#1f2f4f" : "#1a1a2a",
+                  border: `1px solid ${speechLangMode === "mixed" ? "#2f5fa0" : "#333"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  color: speechLangMode === "mixed" ? "#9ec1f7" : "#666",
+                  fontSize: ".75rem",
+                  cursor: "pointer",
+                  fontFamily: "inherit"
+                }}
+              >
+                辨識語言：{sttEngine === "openai-realtime" ? "自動" : "中英混合"}
+              </button>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => toggleAudioInputConfig("autoGainControl")}
+                style={{
+                  background: audioInputConfig.autoGainControl ? "#173022" : "#1a1a2a",
+                  border: `1px solid ${audioInputConfig.autoGainControl ? "#2d7a52" : "#333"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  color: audioInputConfig.autoGainControl ? "#6ee7a8" : "#666",
+                  fontSize: ".75rem",
+                  cursor: "pointer",
+                  fontFamily: "inherit"
+                }}
+              >
+                自動增益 AGC：{audioInputConfig.autoGainControl ? "開" : "關"}
+              </button>
+              <button
+                type="button"
+                onClick={() => toggleAudioInputConfig("noiseSuppression")}
+                style={{
+                  background: audioInputConfig.noiseSuppression ? "#173022" : "#1a1a2a",
+                  border: `1px solid ${audioInputConfig.noiseSuppression ? "#2d7a52" : "#333"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  color: audioInputConfig.noiseSuppression ? "#6ee7a8" : "#666",
+                  fontSize: ".75rem",
+                  cursor: "pointer",
+                  fontFamily: "inherit"
+                }}
+              >
+                降噪 NS：{audioInputConfig.noiseSuppression ? "開" : "關"}
+              </button>
+            </div>
+            <div style={{ marginTop: 6, color: "#4e4e68", fontSize: ".7rem", lineHeight: 1.4 }}>
+              不同瀏覽器可能忽略部分設定，建議錄音中邊講邊觀察辨識結果。停頓超過 1.1 秒會自動換行。
+            </div>
+          </div>
           <div style={{ marginBottom: 10 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
               <label style={{ color: "#a78bfa", fontSize: ".75rem", letterSpacing: ".08em" }}>🎙 你的問題（面試官）</label>
@@ -653,17 +1356,49 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
                 {listeningTarget === "question" ? "停止錄音" : "語音輸入"}
               </button>
             </div>
-            <input
+            <textarea
               value={currentQuestion}
-              onChange={e => setCurrentQuestion(e.target.value)}
+              onChange={(e) => {
+                currentQuestionRef.current = e.target.value;
+                setCurrentQuestion(e.target.value);
+              }}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  handoffToCandidateAnswer();
+                }
+              }}
               placeholder="輸入或語音說出你的問題..."
+              rows={2}
               style={{
                 width: "100%", background: "#111120",
                 border: `1px solid ${listeningTarget === "question" ? "#3a2a60" : "#222"}`,
                 borderRadius: 8, padding: "10px 14px", color: "#e8e0d0",
-                fontSize: ".95rem", fontFamily: "inherit", transition: "border-color .2s"
+                fontSize: ".95rem", fontFamily: "inherit", transition: "border-color .2s",
+                resize: "vertical", lineHeight: 1.6
               }}
             />
+            <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <span style={{ color: "#4e4e68", fontSize: ".72rem" }}>快捷鍵：Cmd/Ctrl + Enter</span>
+              <button
+                type="button"
+                onClick={handoffToCandidateAnswer}
+                disabled={!currentQuestion.trim()}
+                style={{
+                  background: currentQuestion.trim() ? "#142034" : "#111",
+                  border: `1px solid ${currentQuestion.trim() ? "#213652" : "#1a1a1a"}`,
+                  borderRadius: 6,
+                  padding: "5px 10px",
+                  color: currentQuestion.trim() ? "#9ec1f7" : "#333",
+                  fontSize: ".75rem",
+                  cursor: currentQuestion.trim() ? "pointer" : "not-allowed",
+                  fontFamily: "inherit",
+                  transition: "all .2s"
+                }}
+              >
+                問完 → 轉到面試者錄音
+              </button>
+            </div>
             {listeningTarget === "question" && interimText && (
               <div style={{ marginTop: 4, padding: "4px 10px", background: "#1a1a30", borderRadius: 6, color: "#7060c0", fontSize: ".8rem", fontStyle: "italic" }}>
                 ⏳ {interimText}
@@ -688,7 +1423,10 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
             <textarea
               ref={answerRef}
               value={currentAnswer}
-              onChange={e => setCurrentAnswer(e.target.value)}
+              onChange={(e) => {
+                currentAnswerRef.current = e.target.value;
+                setCurrentAnswer(e.target.value);
+              }}
               placeholder="輸入或語音記錄面試者說了什麼重點..."
               rows={3}
               style={{
@@ -702,6 +1440,11 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
             {listeningTarget === "answer" && interimText && (
               <div style={{ marginTop: 4, padding: "4px 10px", background: "#1a2e1a", borderRadius: 6, color: "#2a8a4a", fontSize: ".8rem", fontStyle: "italic" }}>
                 ⏳ {interimText}
+              </div>
+            )}
+            {listeningTarget && micWarning && (
+              <div style={{ marginTop: 6, padding: "6px 10px", background: "#2a1a12", border: "1px solid #4a2a16", borderRadius: 6, color: "#f59e0b", fontSize: ".78rem", lineHeight: 1.4 }}>
+                ⚠ {micWarning}
               </div>
             )}
           </div>
@@ -792,7 +1535,10 @@ ${historyText ? `對話紀錄：\n${historyText}\n\n` : ""}最新面試者回答
               <div style={{ color: "#666", fontSize: ".72rem", letterSpacing: ".1em", marginBottom: 10 }}>建議下一個問題</div>
               {aiResult.nextQuestions?.map((q, i) => (
                 <div key={i} style={{ marginBottom: 8 }}>
-                  <button onClick={() => setCurrentQuestion(q)} style={{
+                  <button onClick={() => {
+                    currentQuestionRef.current = q;
+                    setCurrentQuestion(q);
+                  }} style={{
                     background: "none", border: "none", textAlign: "left",
                     color: "#c8c0e0", fontSize: ".85rem", lineHeight: 1.5, cursor: "pointer",
                     padding: "8px 10px", borderRadius: 6, width: "100%",

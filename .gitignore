@@ -27,6 +27,8 @@ dist-ssr
 .env
 .env.*
 !.env.example
+server/.dev.vars
+server/.dev.vars.*
 
 # Test and coverage outputs
 coverage
@@ -42,3 +44,5 @@ coverage
 # Tool caches
 .cache
 .eslintcache
+.wrangler
+server/.wrangler

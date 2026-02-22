@@ -1,0 +1,8 @@
+name = "interview-assistant-api"
+main = "src/index.js"
+compatibility_date = "2026-02-21"
+
+[vars]
+# Set this to your frontend domain when deploying.
+# Example: "https://interview-assistant.pages.dev"
+ALLOWED_ORIGIN = ""
