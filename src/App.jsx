@@ -23,6 +23,7 @@ export default function InterviewAssistant() {
   const [phase, setPhase] = useState("setup"); // setup | interview
   const [newTopicInput, setNewTopicInput] = useState("");
   const [exportStatus, setExportStatus] = useState("");
+  const [showDetailControls, setShowDetailControls] = useState(false);
   const [quickActionStep, setQuickActionStep] = useState(0); // 0: question, 1: answer, 2: save+background analyze+continue
   const [sttEngine, setSttEngine] = useState("openai-realtime");
   const [realtimeStatus, setRealtimeStatus] = useState("idle");
@@ -1205,136 +1206,159 @@ export default function InterviewAssistant() {
 
         {/* Input area */}
         <div style={{ padding: "16px 24px", background: "#0d0d14", borderTop: "1px solid #1a1a28" }}>
-          <div style={{ marginBottom: 12, padding: "8px 10px", background: "#10101a", border: "1px solid #1b1b2a", borderRadius: 8 }}>
-            <div style={{ color: "#7a7a90", fontSize: ".7rem", letterSpacing: ".08em", marginBottom: 8 }}>
-              錄音前處理參數
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-              <button
-                type="button"
-                onClick={() => setSttEngine("browser")}
-                style={{
-                  background: sttEngine === "browser" ? "#2a1a40" : "#1a1a2a",
-                  border: `1px solid ${sttEngine === "browser" ? "#a78bfa" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: sttEngine === "browser" ? "#cdb6ff" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                STT：瀏覽器
-              </button>
-              <button
-                type="button"
-                onClick={() => setSttEngine("openai-realtime")}
-                style={{
-                  background: sttEngine === "openai-realtime" ? "#173022" : "#1a1a2a",
-                  border: `1px solid ${sttEngine === "openai-realtime" ? "#2d7a52" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: sttEngine === "openai-realtime" ? "#6ee7a8" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                STT：OpenAI Realtime
-              </button>
-              {sttEngine === "openai-realtime" && (
-                <span style={{ color: "#4e4e68", fontSize: ".72rem", alignSelf: "center" }}>
-                  狀態：{realtimeStatus}
-                </span>
-              )}
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-              <button
-                type="button"
-                onClick={() => setSpeechLangMode("zh-TW")}
-                style={{
-                  background: speechLangMode === "zh-TW" ? "#1f2f4f" : "#1a1a2a",
-                  border: `1px solid ${speechLangMode === "zh-TW" ? "#2f5fa0" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: speechLangMode === "zh-TW" ? "#9ec1f7" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                辨識語言：中文
-              </button>
-              <button
-                type="button"
-                onClick={() => setSpeechLangMode("en-US")}
-                style={{
-                  background: speechLangMode === "en-US" ? "#1f2f4f" : "#1a1a2a",
-                  border: `1px solid ${speechLangMode === "en-US" ? "#2f5fa0" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: speechLangMode === "en-US" ? "#9ec1f7" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                辨識語言：英文
-              </button>
-              <button
-                type="button"
-                onClick={() => setSpeechLangMode("mixed")}
-                style={{
-                  background: speechLangMode === "mixed" ? "#1f2f4f" : "#1a1a2a",
-                  border: `1px solid ${speechLangMode === "mixed" ? "#2f5fa0" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: speechLangMode === "mixed" ? "#9ec1f7" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                辨識語言：{sttEngine === "openai-realtime" ? "自動" : "中英混合"}
-              </button>
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button
-                type="button"
-                onClick={() => toggleAudioInputConfig("autoGainControl")}
-                style={{
-                  background: audioInputConfig.autoGainControl ? "#173022" : "#1a1a2a",
-                  border: `1px solid ${audioInputConfig.autoGainControl ? "#2d7a52" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: audioInputConfig.autoGainControl ? "#6ee7a8" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                自動增益 AGC：{audioInputConfig.autoGainControl ? "開" : "關"}
-              </button>
-              <button
-                type="button"
-                onClick={() => toggleAudioInputConfig("noiseSuppression")}
-                style={{
-                  background: audioInputConfig.noiseSuppression ? "#173022" : "#1a1a2a",
-                  border: `1px solid ${audioInputConfig.noiseSuppression ? "#2d7a52" : "#333"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  color: audioInputConfig.noiseSuppression ? "#6ee7a8" : "#666",
-                  fontSize: ".75rem",
-                  cursor: "pointer",
-                  fontFamily: "inherit"
-                }}
-              >
-                降噪 NS：{audioInputConfig.noiseSuppression ? "開" : "關"}
-              </button>
-            </div>
-            <div style={{ marginTop: 6, color: "#4e4e68", fontSize: ".7rem", lineHeight: 1.4 }}>
-              不同瀏覽器可能忽略部分設定，建議錄音中邊講邊觀察辨識結果。停頓超過 1.1 秒會自動換行。
-            </div>
+          <div style={{ marginBottom: 12 }}>
+            <button
+              type="button"
+              onClick={() => setShowDetailControls((prev) => !prev)}
+              style={{
+                width: "100%",
+                background: showDetailControls ? "#1c2234" : "#12121d",
+                border: `1px solid ${showDetailControls ? "#2e3c62" : "#1f1f30"}`,
+                borderRadius: 8,
+                padding: "9px 12px",
+                color: showDetailControls ? "#c7d6f6" : "#8a8aa5",
+                fontSize: ".8rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                fontFamily: "inherit",
+                textAlign: "left"
+              }}
+            >
+              {showDetailControls ? "▾ 細節調整（已展開）" : "▸ 細節調整"}
+            </button>
+            {showDetailControls && (
+              <div style={{ marginTop: 8, padding: "8px 10px", background: "#10101a", border: "1px solid #1b1b2a", borderRadius: 8 }}>
+                <div style={{ color: "#7a7a90", fontSize: ".7rem", letterSpacing: ".08em", marginBottom: 8 }}>
+                  錄音前處理參數
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => setSttEngine("browser")}
+                    style={{
+                      background: sttEngine === "browser" ? "#2a1a40" : "#1a1a2a",
+                      border: `1px solid ${sttEngine === "browser" ? "#a78bfa" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: sttEngine === "browser" ? "#cdb6ff" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    STT：瀏覽器
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSttEngine("openai-realtime")}
+                    style={{
+                      background: sttEngine === "openai-realtime" ? "#173022" : "#1a1a2a",
+                      border: `1px solid ${sttEngine === "openai-realtime" ? "#2d7a52" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: sttEngine === "openai-realtime" ? "#6ee7a8" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    STT：OpenAI Realtime
+                  </button>
+                  {sttEngine === "openai-realtime" && (
+                    <span style={{ color: "#4e4e68", fontSize: ".72rem", alignSelf: "center" }}>
+                      狀態：{realtimeStatus}
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => setSpeechLangMode("zh-TW")}
+                    style={{
+                      background: speechLangMode === "zh-TW" ? "#1f2f4f" : "#1a1a2a",
+                      border: `1px solid ${speechLangMode === "zh-TW" ? "#2f5fa0" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: speechLangMode === "zh-TW" ? "#9ec1f7" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    辨識語言：中文
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSpeechLangMode("en-US")}
+                    style={{
+                      background: speechLangMode === "en-US" ? "#1f2f4f" : "#1a1a2a",
+                      border: `1px solid ${speechLangMode === "en-US" ? "#2f5fa0" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: speechLangMode === "en-US" ? "#9ec1f7" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    辨識語言：英文
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSpeechLangMode("mixed")}
+                    style={{
+                      background: speechLangMode === "mixed" ? "#1f2f4f" : "#1a1a2a",
+                      border: `1px solid ${speechLangMode === "mixed" ? "#2f5fa0" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: speechLangMode === "mixed" ? "#9ec1f7" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    辨識語言：{sttEngine === "openai-realtime" ? "自動" : "中英混合"}
+                  </button>
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => toggleAudioInputConfig("autoGainControl")}
+                    style={{
+                      background: audioInputConfig.autoGainControl ? "#173022" : "#1a1a2a",
+                      border: `1px solid ${audioInputConfig.autoGainControl ? "#2d7a52" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: audioInputConfig.autoGainControl ? "#6ee7a8" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    自動增益 AGC：{audioInputConfig.autoGainControl ? "開" : "關"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleAudioInputConfig("noiseSuppression")}
+                    style={{
+                      background: audioInputConfig.noiseSuppression ? "#173022" : "#1a1a2a",
+                      border: `1px solid ${audioInputConfig.noiseSuppression ? "#2d7a52" : "#333"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      color: audioInputConfig.noiseSuppression ? "#6ee7a8" : "#666",
+                      fontSize: ".75rem",
+                      cursor: "pointer",
+                      fontFamily: "inherit"
+                    }}
+                  >
+                    降噪 NS：{audioInputConfig.noiseSuppression ? "開" : "關"}
+                  </button>
+                </div>
+                <div style={{ marginTop: 6, color: "#4e4e68", fontSize: ".7rem", lineHeight: 1.4 }}>
+                  不同瀏覽器可能忽略部分設定，建議錄音中邊講邊觀察辨識結果。停頓超過 1.1 秒會自動換行。
+                </div>
+              </div>
+            )}
           </div>
           <div style={{ marginBottom: 12 }}>
             <button
