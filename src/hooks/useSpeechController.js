@@ -5,7 +5,7 @@ import { appendFinalChunk, mergeTranscript, stabilizeInterim } from "../utils/tr
 const WATCHDOG_INTERVAL_MS = 1500;
 const STALL_TIMEOUT_MS = 12000;
 const MAX_SESSION_DURATION_MS = 90000;
-const LOW_VOLUME_RMS_THRESHOLD = 0.015;
+const LOW_VOLUME_RMS_THRESHOLD = 0.008;
 const LOW_VOLUME_HOLD_MS = 1800;
 const MIC_MONITOR_INTERVAL_MS = 350;
 const PAUSE_LINE_BREAK_MS = 1100;
@@ -29,14 +29,14 @@ export const useSpeechController = ({
   const [speechLangMode, setSpeechLangMode] = useState("zh-TW");
   const [audioInputConfig, setAudioInputConfig] = useState({
     autoGainControl: true,
-    noiseSuppression: true
+    noiseSuppression: false
   });
 
   const recognitionRef = useRef(null);
-  const flushPendingInterimRef = useRef(() => {});
-  const stopMicMonitorRef = useRef(() => {});
+  const flushPendingInterimRef = useRef(() => { });
+  const stopMicMonitorRef = useRef(() => { });
   const safeStartRecognitionRef = useRef(() => false);
-  const safeStopRecognitionRef = useRef(() => {});
+  const safeStopRecognitionRef = useRef(() => { });
   const realtimeTranscriberRef = useRef(null);
   const sttEngineRef = useRef("openai-realtime");
   const shouldRestartRef = useRef(false);
@@ -54,7 +54,7 @@ export const useSpeechController = ({
   const lastFinalAtRef = useRef(0);
   const audioInputConfigRef = useRef({
     autoGainControl: true,
-    noiseSuppression: true
+    noiseSuppression: false
   });
   const speechLangModeRef = useRef("zh-TW");
   const mixedPreferredLangRef = useRef("zh-TW");
@@ -200,7 +200,7 @@ export const useSpeechController = ({
     }
     monitorAnalyserRef.current = null;
     if (monitorAudioContextRef.current) {
-      monitorAudioContextRef.current.close().catch(() => {});
+      monitorAudioContextRef.current.close().catch(() => { });
       monitorAudioContextRef.current = null;
     }
     if (monitorStreamRef.current) {
@@ -372,7 +372,7 @@ export const useSpeechController = ({
         language,
         includeLogprobs: false,
         noiseReductionType: "near_field",
-        silenceDurationMs: 900,
+        silenceDurationMs: 1200,
         audioConfig: {
           autoGainControl: audioInputConfig.autoGainControl,
           noiseSuppression: audioInputConfig.noiseSuppression,

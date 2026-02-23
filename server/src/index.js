@@ -90,12 +90,12 @@ const buildSessionPayload = (input = {}) => {
   const silenceDurationMs = Number(input.silenceDurationMs);
   const turnDetection = {
     type: "server_vad",
-    threshold: 0.5,
-    prefix_padding_ms: 300,
+    threshold: 0.3,
+    prefix_padding_ms: 500,
     silence_duration_ms:
       Number.isFinite(silenceDurationMs) && silenceDurationMs >= 200 && silenceDurationMs <= 3000
         ? Math.floor(silenceDurationMs)
-        : 900,
+        : 1200,
   };
 
   return {

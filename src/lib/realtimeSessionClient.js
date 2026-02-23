@@ -22,7 +22,7 @@ export const createRealtimeTranscriptionSession = async (options = {}) => {
         prompt: options.prompt || "",
         includeLogprobs: Boolean(options.includeLogprobs),
         noiseReductionType: options.noiseReductionType || "near_field",
-        silenceDurationMs: options.silenceDurationMs || 900,
+        silenceDurationMs: options.silenceDurationMs || 1200,
       }),
       signal: controller.signal,
     });
